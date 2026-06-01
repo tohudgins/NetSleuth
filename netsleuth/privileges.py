@@ -36,11 +36,13 @@ def can_raw_socket() -> bool:
 def privilege_notice() -> str:
     """Human-readable line describing the current capability level.
 
-    Used by the CLI/UI so the user always knows which scan mode is active.
+    Mode-neutral on purpose: each mode reports its own degraded behaviour (the
+    scanner shows a "connect scan" title; the sniffer says capture is skipped),
+    so this line only states whether raw sockets are available.
     """
     if is_privileged():
-        return "Privileged: SYN scan and raw packet capture available."
+        return "Privileged: raw sockets available (SYN scan + live packet capture)."
     return (
-        "Unprivileged: falling back to TCP connect scan; raw capture disabled. "
-        "Re-run with sudo (Linux/macOS) or as Administrator (Windows) for full features."
+        "Unprivileged: raw sockets unavailable. Re-run with sudo (Linux/macOS) or "
+        "as Administrator (Windows) for SYN scan and live packet capture."
     )

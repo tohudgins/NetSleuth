@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import threading
 import time
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -25,6 +26,13 @@ try:
     from scapy.all import conf as scapy_conf
 
     scapy_conf.verb = 0
+    # scapy 2.7 deprecated direct DNS qd/an/ns/ar access; the API still works and
+    # _dns_info() handles both shapes. Silence only that one third-party warning
+    # so a live DNS capture doesn't print noise.
+    warnings.filterwarnings(
+        "ignore", message="The DNS fields.*",
+        category=DeprecationWarning, module="scapy",
+    )
     _SCAPY_AVAILABLE = True
 except Exception:  # pragma: no cover - environment dependent
     _SCAPY_AVAILABLE = False
@@ -47,17 +55,21 @@ class PacketSummary:
     info: str
 
 
+def _dns_qname(dns: Any) -> str:
+    """First question name, tolerant of scapy returning a list or single record."""
+    qd = dns.qd
+    if not qd:
+        return ""
+    first = qd[0] if isinstance(qd, list) else qd
+    return bytes(first.qname).decode(errors="replace").rstrip(".")
+
+
 def _dns_info(pkt: Any) -> str:
     dns = pkt[DNS]
-    if dns.qr == 0 and dns.qd is not None:  # query
-        qname = bytes(dns.qd.qname).decode(errors="replace").rstrip(".")
-        return f"DNS query {qname}"
-    if dns.qr == 1:  # response
-        name = ""
-        if dns.qd is not None:
-            name = bytes(dns.qd.qname).decode(errors="replace").rstrip(".")
-        return f"DNS response {name} ({dns.ancount} answer(s))"
-    return "DNS"
+    qname = _dns_qname(dns)
+    if int(dns.qr) == 0:  # query
+        return f"DNS query {qname}".rstrip()
+    return f"DNS response {qname} ({int(dns.ancount)} answer(s))"
 
 
 def summarize(pkt: Any) -> PacketSummary:
