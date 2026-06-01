@@ -18,6 +18,7 @@ from rich.live import Live
 
 from netsleuth import ui
 from netsleuth.analyzer import AnomalyFlag, analyze
+from netsleuth.pcap import analyze_pcap
 from netsleuth.privileges import privilege_notice
 from netsleuth.reporter import build_report, write_report
 from netsleuth.scanner import Protocol, ScanReport, scan
@@ -76,6 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
     intg_grp = p.add_argument_group("integration + reporting")
     intg_grp.add_argument("--scan-then-sniff", action="store_true",
                           help="scan, then sniff the target's open ports (live dashboard)")
+    intg_grp.add_argument("--pcap", default=None, metavar="FILE",
+                          help="analyze a saved capture file offline (no privileges)")
     intg_grp.add_argument("--report-dir", default=None,
                           help="write JSON + HTML report into this directory")
     return p
@@ -171,6 +174,15 @@ def run_sniff(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_pcap(args: argparse.Namespace) -> int:
+    ui.console.print(f"Analyzing capture file: {args.pcap}", style="cyan")
+    result = analyze_pcap(args.pcap)
+    ui.console.print(ui.render_traffic_table(result.stats))
+    ui.console.print(ui.render_anomalies(result.anomalies))
+    _write_reports(args, stats=result.stats, anomalies=result.anomalies)
+    return 0
+
+
 def run_scan_then_sniff(args: argparse.Namespace) -> int:
     # Always TCP for the scan stage so we have ports to focus the capture on.
     report = _scan(args, Protocol.TCP, show_progress=True)
@@ -230,8 +242,12 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    ui.print_privilege_notice(privilege_notice())
 
+    # PCAP analysis is offline and needs no privileges, so skip the notice.
+    if args.pcap:
+        return run_pcap(args)
+
+    ui.print_privilege_notice(privilege_notice())
     if args.scan_then_sniff:
         return run_scan_then_sniff(args)
     if args.sniff:

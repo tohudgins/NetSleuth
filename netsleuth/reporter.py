@@ -60,6 +60,8 @@ def build_report(
         report["traffic"] = {
             "packets": stats.packets,
             "bytes": stats.bytes,
+            "by_proto": dict(sorted(stats.by_proto.items(),
+                                    key=lambda kv: kv[1], reverse=True)),
             "by_ip": [
                 {"ip": ip, "packets": c.packets, "bytes": c.bytes}
                 for ip, c in stats.top(50)

@@ -54,6 +54,13 @@
 
   {% if traffic %}
   <h2>Traffic — {{ traffic.packets }} packets / {{ traffic.bytes }} bytes</h2>
+  {% if traffic.by_proto %}
+  <p>Protocols:
+    {% for proto, count in traffic.by_proto.items() %}
+    <code>{{ proto }}: {{ count }}</code>{% if not loop.last %} {% endif %}
+    {% endfor %}
+  </p>
+  {% endif %}
   <table>
     <thead><tr><th>Source IP</th><th>Packets</th><th>Bytes</th></tr></thead>
     <tbody>

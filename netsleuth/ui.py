@@ -93,7 +93,13 @@ def print_packet(summary: PacketSummary) -> None:
 
 def render_traffic_table(stats: TrafficStats, top: int = 10) -> Table:
     """Build a rich Table of the top talkers by volume (returned for testing)."""
+    protos = ", ".join(
+        f"{proto}:{count}"
+        for proto, count in sorted(stats.by_proto.items(), key=lambda kv: -kv[1])
+    )
     title = f"Traffic — {stats.packets} pkts / {stats.bytes} bytes"
+    if protos:
+        title += f"  [{protos}]"
     table = Table(title=title, header_style="bold cyan", expand=False)
     table.add_column("Source IP")
     table.add_column("Packets", justify="right")

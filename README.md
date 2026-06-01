@@ -52,6 +52,25 @@ Run unprivileged and NetSleuth **warns and degrades** — it falls back to a TCP
 connect scan and skips live capture rather than crashing (the scan still runs
 and a scan-only report is still written).
 
+### Analyzing real-world captures (blue-team, no privileges)
+
+You don't need to capture live traffic to exercise the detection — point
+NetSleuth at a saved capture file. This is the legal way to run it over real
+adversarial traffic (see `lab/README.md` for public dataset sources):
+
+```bash
+# generate the lab's sample malicious captures (writes files, sends nothing)
+python lab/generate_samples.py
+
+# detect the attack in a capture — no sudo required
+python main.py --pcap lab/samples/port_scan.pcap
+python main.py --pcap lab/samples/syn_flood.pcap --report-dir reports
+python main.py --pcap path/to/real-world.pcap   # e.g. a malware-traffic capture
+```
+
+The analyzer flags port-scan, SYN-flood, and ARP-spoof patterns and writes the
+same JSON/HTML report as the live modes.
+
 ## Practice legally
 
 A `lab/` directory provides deliberately-open containers so you have a legal
@@ -62,4 +81,4 @@ target out of the box. See `lab/README.md`.
 - [x] Phase 1 — Scanner (connect + SYN, UDP, banner grab, OS family heuristic)
 - [x] Phase 2 — Sniffer (threaded scapy capture, TCP/UDP/ICMP/ARP/DNS decode, per-IP stats)
 - [x] Phase 3 — Integration (--scan-then-sniff), analyzer anomaly flags, live dashboard, JSON/HTML reports
-- [ ] Phase 4 — Stretch (PCAP import, honeypot mode, CVE lookup)
+- [~] Phase 4 — PCAP import + attack-sample lab (done); alert forwarding + CVE lookup (in progress)

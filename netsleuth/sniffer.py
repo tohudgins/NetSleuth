@@ -145,11 +145,12 @@ class _IPCounter:
 
 @dataclass
 class TrafficStats:
-    """Running per-source-IP volume counters."""
+    """Running per-source-IP volume counters plus a per-protocol breakdown."""
 
     packets: int = 0
     bytes: int = 0
     by_ip: dict[str, _IPCounter] = field(default_factory=dict)
+    by_proto: dict[str, int] = field(default_factory=dict)
 
     def record(self, s: PacketSummary) -> None:
         self.packets += 1
@@ -157,6 +158,7 @@ class TrafficStats:
         c = self.by_ip.setdefault(s.src, _IPCounter())
         c.packets += 1
         c.bytes += s.length
+        self.by_proto[s.proto] = self.by_proto.get(s.proto, 0) + 1
 
     def top(self, n: int = 10) -> list[tuple[str, _IPCounter]]:
         return sorted(self.by_ip.items(), key=lambda kv: kv[1].bytes, reverse=True)[:n]
