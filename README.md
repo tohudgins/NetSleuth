@@ -27,15 +27,22 @@ pip install -e .
 ## Usage
 
 ```bash
-# Phase 1: scan localhost (works unprivileged via connect scan)
+# scan localhost (works unprivileged via connect scan)
 python main.py 127.0.0.1 -p 1-1024
 
 # privileged SYN scan (needs sudo / Administrator)
 sudo python main.py 127.0.0.1 -p 22,80,443
+
+# UDP scan
+python main.py 127.0.0.1 -p 53,123 --udp
+
+# live packet capture for 10s (needs sudo / Administrator)
+sudo python main.py --sniff --duration 10
+sudo python main.py --sniff --filter "tcp port 80" --count 50 --hex
 ```
 
-Run unprivileged and NetSleuth **warns and degrades** to a connect scan rather
-than crashing.
+Run unprivileged and NetSleuth **warns and degrades** — it falls back to a TCP
+connect scan and skips live capture rather than crashing.
 
 ## Practice legally
 
@@ -44,7 +51,7 @@ target out of the box. See `lab/README.md`.
 
 ## Status
 
-- [x] Phase 1 — Scanner (connect + SYN, banner grab, OS family heuristic)
-- [ ] Phase 2 — Sniffer
+- [x] Phase 1 — Scanner (connect + SYN, UDP, banner grab, OS family heuristic)
+- [x] Phase 2 — Sniffer (threaded scapy capture, TCP/UDP/ICMP/ARP/DNS decode, per-IP stats)
 - [ ] Phase 3 — Integration, analyzer, dashboard, JSON/HTML reports
 - [ ] Phase 4 — Stretch (PCAP import, honeypot mode, CVE lookup)

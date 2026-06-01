@@ -1,18 +1,20 @@
-"""NetSleuth CLI presentation — ``rich`` rendering for the scanner.
+"""NetSleuth CLI presentation — ``rich`` rendering for scanner and sniffer.
 
-Pure presentation: it reads scanner results and renders them. It holds no
-scanning or capture logic. A live traffic dashboard arrives with the sniffer in
-Phase 3; this module currently covers the privilege notice, the scan results
-table, and a scan progress bar.
+Pure presentation: it reads scanner/sniffer results and renders them. It holds
+no scanning or capture logic. Covers the privilege notice, the scan results
+table, a scan progress bar, live packet lines, and a traffic-stats table.
 """
 
 from __future__ import annotations
+
+import time
 
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from .scanner import PortState, ScanReport
+from .sniffer import PacketSummary, TrafficStats
 
 console = Console()
 
@@ -22,6 +24,15 @@ _STATE_STYLE = {
     PortState.OPEN_FILTERED: "yellow",
     PortState.FILTERED: "dim",
     PortState.CLOSED: "red",
+}
+
+# Colour per protocol for live capture lines.
+_PROTO_STYLE = {
+    "TCP": "cyan",
+    "UDP": "blue",
+    "ICMP": "magenta",
+    "ARP": "yellow",
+    "DNS": "green",
 }
 
 
@@ -65,3 +76,25 @@ def make_scan_progress() -> Progress:
         console=console,
         transient=True,
     )
+
+
+def print_packet(summary: PacketSummary) -> None:
+    """Print one live capture line, coloured by protocol."""
+    clock = time.strftime("%H:%M:%S", time.localtime(summary.ts))
+    style = _PROTO_STYLE.get(summary.proto, "white")
+    console.print(
+        f"[dim]{clock}[/dim] [{style}]{summary.proto:<5}[/{style}] "
+        f"{summary.length:>5}B  {summary.info}"
+    )
+
+
+def render_traffic_table(stats: TrafficStats, top: int = 10) -> Table:
+    """Build a rich Table of the top talkers by volume (returned for testing)."""
+    title = f"Traffic — {stats.packets} pkts / {stats.bytes} bytes"
+    table = Table(title=title, header_style="bold cyan", expand=False)
+    table.add_column("Source IP")
+    table.add_column("Packets", justify="right")
+    table.add_column("Bytes", justify="right")
+    for ip, counter in stats.top(top):
+        table.add_row(ip, str(counter.packets), str(counter.bytes))
+    return table
