@@ -58,3 +58,25 @@ def test_write_report_creates_files(tmp_path):
     paths = write_report(tmp_path, rep)
     assert paths["json"].exists() and paths["html"].exists()
     assert "127.0.0.1" in paths["json"].read_text()
+
+
+def test_scan_only_html_omits_anomalies_section():
+    # Without capture, the anomalies key is absent — the section must not render
+    # a misleading "None detected" (regression: Undefined is not none -> True).
+    html = to_html(build_report(scan=_scan_report()))
+    assert "Anomaly flags" not in html
+
+
+def test_empty_anomalies_shows_none_detected():
+    html = to_html(build_report(scan=_scan_report(), stats=_stats(), anomalies=[]))
+    assert "Anomaly flags" in html
+    assert "None detected" in html
+
+
+def test_open_filtered_state_css_class():
+    report = ScanReport(
+        target="127.0.0.1", scan_type="udp-connect", proto=Protocol.UDP,
+        ports=[PortResult(53, PortState.OPEN_FILTERED, Protocol.UDP)],
+    )
+    html = to_html(build_report(scan=report))
+    assert "state-open-filtered" in html

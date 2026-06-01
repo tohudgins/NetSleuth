@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import time
-from collections import deque
 from typing import Any
 
 from rich.live import Live
@@ -165,7 +164,7 @@ def run_sniff(args: argparse.Namespace) -> int:
     finally:
         sniffer.stop()
 
-    anomalies = analyze(sniffer.packets)
+    anomalies = analyze(list(sniffer.packets))
     ui.console.print(ui.render_traffic_table(sniffer.stats))
     ui.console.print(ui.render_anomalies(anomalies))
     _write_reports(args, stats=sniffer.stats, anomalies=anomalies)
@@ -194,32 +193,35 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
 
     ports_clause = " or ".join(f"tcp port {p}" for p in open_ports)
     bpf = f"host {args.target} and ({ports_clause})"
-    recent: deque[PacketSummary] = deque(maxlen=12)
-    sniffer = Sniffer(iface=args.iface, bpf_filter=bpf,
-                      on_packet=lambda s, _raw: recent.append(s))
+    # The sniffer collects into its own list from the capture thread; we only
+    # read atomic snapshots here, so we don't share a mutable buffer across
+    # threads (list(x) over a list is atomic under the GIL).
+    sniffer = Sniffer(iface=args.iface, bpf_filter=bpf)
 
     ui.console.print(
         f"Sniffing {args.target} ports {open_ports} for {args.duration:g}s "
         "— Ctrl-C to stop early…", style="cyan",
     )
     anomalies: list[AnomalyFlag] = []
+
+    def _frame() -> Any:
+        nonlocal anomalies
+        snapshot = list(sniffer.packets)  # atomic copy of the capture buffer
+        anomalies = analyze(snapshot)
+        return ui.render_dashboard(report, sniffer.stats, anomalies, snapshot[-12:])
+
     sniffer.start()
     deadline = time.monotonic() + args.duration
-    with Live(ui.render_dashboard(report, sniffer.stats, anomalies, list(recent)),
-              console=ui.console, refresh_per_second=4) as live:
+    with Live(_frame(), console=ui.console, refresh_per_second=4) as live:
         try:
             while sniffer.running and time.monotonic() < deadline:
                 time.sleep(0.25)
-                anomalies = analyze(sniffer.packets)
-                live.update(ui.render_dashboard(
-                    report, sniffer.stats, anomalies, list(recent)))
+                live.update(_frame())
         except KeyboardInterrupt:
             pass
         finally:
             sniffer.stop()
-            anomalies = analyze(sniffer.packets)
-            live.update(ui.render_dashboard(
-                report, sniffer.stats, anomalies, list(recent)))
+            live.update(_frame())
 
     _write_reports(args, scan_report=report, stats=sniffer.stats,
                    anomalies=anomalies, default_dir="reports")

@@ -17,11 +17,11 @@
     table { border-collapse: collapse; margin: 0.6rem 0 1.5rem; }
     th, td { border: 1px solid #ccc; padding: 4px 10px; text-align: left; }
     th { background: #f3f4f6; }
-    .open { color: #15803d; font-weight: 600; }
-    .closed { color: #b91c1c; }
-    .filtered, .open\|filtered { color: #a16207; }
+    .state-open { color: #15803d; font-weight: 600; }
+    .state-closed { color: #b91c1c; }
+    .state-filtered, .state-open-filtered { color: #a16207; }
     .warning { color: #b91c1c; font-weight: 600; }
-    code { background: #f3f4f6; padding: 0 4px; }
+    code { background: #f3f4f6; padding: 0 4px; white-space: pre-wrap; }
   </style>
 </head>
 <body>
@@ -43,7 +43,7 @@
       <tr>
         <td>{{ p.port }}</td>
         <td>{{ p.proto }}</td>
-        <td class="{{ p.state }}">{{ p.state }}</td>
+        <td class="state-{{ p.state | replace('|', '-') }}">{{ p.state }}</td>
         <td>{{ p.service_hint or "" }}</td>
         <td><code>{{ p.banner or "" }}</code></td>
       </tr>
@@ -64,16 +64,17 @@
   </table>
   {% endif %}
 
-  {% if anomalies %}
+  {% if anomalies is defined %}
   <h2>Anomaly flags (heuristic)</h2>
+  {% if anomalies %}
   <ul>
     {% for a in anomalies %}
     <li><span class="{{ a.severity }}">[{{ a.kind }}]</span> {{ a.detail }}</li>
     {% endfor %}
   </ul>
-  {% elif anomalies is not none %}
-  <h2>Anomaly flags (heuristic)</h2>
+  {% else %}
   <p>None detected.</p>
+  {% endif %}
   {% endif %}
 </body>
 </html>
