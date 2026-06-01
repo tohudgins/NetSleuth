@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import argparse
 
+from netsleuth import ui
 from netsleuth.privileges import privilege_notice
-from netsleuth.scanner import scan
+from netsleuth.scanner import Protocol, scan
 
 
 def _parse_ports(spec: str) -> list[int]:
@@ -38,6 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="target host (default: 127.0.0.1)")
     p.add_argument("-p", "--ports", default="1-1024",
                    help="ports, e.g. '22,80,443' or '1-1024' (default: 1-1024)")
+    p.add_argument("--udp", action="store_true",
+                   help="UDP scan instead of TCP (best-effort when unprivileged)")
     p.add_argument("--timeout", type=float, default=1.0, help="per-port timeout (s)")
     p.add_argument("--workers", type=int, default=100, help="thread pool size")
     p.add_argument("--connect", action="store_true",
@@ -50,28 +53,38 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    print(privilege_notice())
+    ui.print_privilege_notice(privilege_notice())
 
-    report = scan(
-        args.target,
-        _parse_ports(args.ports),
-        timeout=args.timeout,
-        max_workers=args.workers,
-        force_connect=args.connect,
-    )
+    ports = _parse_ports(args.ports)
+    proto = Protocol.UDP if args.udp else Protocol.TCP
 
-    print(f"\n{report.scan_type} scan of {report.target}")
+    progress = ui.make_scan_progress()
+    with progress:
+        task = progress.add_task(f"scanning {args.target}", total=len(ports))
+        report = scan(
+            args.target,
+            ports,
+            proto=proto,
+            timeout=args.timeout,
+            max_workers=args.workers,
+            force_connect=args.connect,
+            on_result=lambda _r: progress.advance(task),
+        )
+
     if report.os_family_guess:
-        print(f"OS family (heuristic, best guess): {report.os_family_guess}")
-    for r in report.ports:
-        if r.state.value == "open":
-            extra = f"  {r.service_hint or ''} {r.banner or ''}".rstrip()
-            print(f"  {r.port}/tcp  open{extra}")
+        ui.console.print(
+            f"OS family (heuristic, best guess): {report.os_family_guess}",
+            style="magenta",
+        )
+    ui.console.print(ui.render_scan_table(report))
     if not report.open_ports:
-        print("  no open ports found")
+        ui.console.print("  no open ports found", style="dim")
 
     if args.scan_then_sniff:
-        print("\n[--scan-then-sniff is a Phase 3 feature — not yet implemented]")
+        ui.console.print(
+            "\n[--scan-then-sniff is a Phase 3 feature — not yet implemented]",
+            style="dim",
+        )
     return 0
 
 

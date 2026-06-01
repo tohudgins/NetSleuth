@@ -23,6 +23,11 @@ netsleuth = "main:main"
 [tool.setuptools]
 packages = ["netsleuth"]
 
+[tool.pytest.ini_options]
+# Put the repo root on sys.path so tests can import the top-level main.py
+# (the editable install only exposes the netsleuth package).
+pythonpath = ["."]
+
 [tool.ruff]
 target-version = "py310"
 line-length = 100
