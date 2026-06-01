@@ -1,18 +1,21 @@
 """NetSleuth CLI presentation — ``rich`` rendering for scanner and sniffer.
 
-Pure presentation: it reads scanner/sniffer results and renders them. It holds
-no scanning or capture logic. Covers the privilege notice, the scan results
-table, a scan progress bar, live packet lines, and a traffic-stats table.
+Pure presentation: it reads scanner/sniffer/analyzer results and renders them.
+It holds no scanning or capture logic. Covers the privilege notice, the scan
+results table, a scan progress bar, live packet lines, a traffic-stats table,
+and the integrated live dashboard.
 """
 
 from __future__ import annotations
 
 import time
 
-from rich.console import Console
+from rich.console import Console, Group, RenderableType
+from rich.panel import Panel
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
+from .analyzer import AnomalyFlag
 from .scanner import PortState, ScanReport
 from .sniffer import PacketSummary, TrafficStats
 
@@ -98,3 +101,38 @@ def render_traffic_table(stats: TrafficStats, top: int = 10) -> Table:
     for ip, counter in stats.top(top):
         table.add_row(ip, str(counter.packets), str(counter.bytes))
     return table
+
+
+def render_anomalies(anomalies: list[AnomalyFlag]) -> Panel:
+    """Panel listing heuristic anomaly flags (or an all-clear)."""
+    if not anomalies:
+        body: RenderableType = "[green]no anomalies flagged[/green]"
+    else:
+        lines = [f"[bold red][{a.kind}][/bold red] {a.detail}" for a in anomalies]
+        body = "\n".join(lines)
+    return Panel(body, title="Anomaly flags (heuristic)", border_style="red")
+
+
+def render_recent_packets(recent: list[PacketSummary]) -> Panel:
+    """Panel of the most recent capture lines, newest last."""
+    lines = []
+    for s in recent:
+        style = _PROTO_STYLE.get(s.proto, "white")
+        lines.append(f"[{style}]{s.proto:<5}[/{style}] {s.length:>5}B  {s.info}")
+    body: RenderableType = "\n".join(lines) if lines else "[dim]waiting…[/dim]"
+    return Panel(body, title="Recent packets", border_style="blue")
+
+
+def render_dashboard(
+    scan_report: ScanReport,
+    stats: TrafficStats,
+    anomalies: list[AnomalyFlag],
+    recent: list[PacketSummary],
+) -> RenderableType:
+    """Compose the integrated dashboard renderable (scan + live traffic)."""
+    return Group(
+        render_scan_table(scan_report),
+        render_traffic_table(stats),
+        render_recent_packets(recent),
+        render_anomalies(anomalies),
+    )

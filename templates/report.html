@@ -1,33 +1,79 @@
 <!DOCTYPE html>
 <!--
-  NetSleuth HTML report template (jinja2) — Phase 3 stub.
-  Rendered by netsleuth/reporter.py:to_html(). Placeholder structure below;
-  fields will be filled in when the reporter is implemented.
+  NetSleuth HTML report template (jinja2).
+  Rendered by netsleuth/reporter.py:to_html() with the build_report() dict:
+  top-level keys generated_at, scan{}, traffic{}, anomalies[].
 -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>NetSleuth Report — {{ target | default("(target)") }}</title>
+  <title>NetSleuth Report{% if scan %} — {{ scan.target }}{% endif %}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
+    h1 { margin-bottom: 0; }
+    .meta { color: #666; font-size: 0.9rem; }
+    .notice { background: #fff8e1; border: 1px solid #ffe082; padding: 0.6rem 0.9rem;
+              border-radius: 6px; margin: 1rem 0; }
+    table { border-collapse: collapse; margin: 0.6rem 0 1.5rem; }
+    th, td { border: 1px solid #ccc; padding: 4px 10px; text-align: left; }
+    th { background: #f3f4f6; }
+    .open { color: #15803d; font-weight: 600; }
+    .closed { color: #b91c1c; }
+    .filtered, .open\|filtered { color: #a16207; }
+    .warning { color: #b91c1c; font-weight: 600; }
+    code { background: #f3f4f6; padding: 0 4px; }
+  </style>
 </head>
 <body>
   <h1>NetSleuth Report</h1>
-  <p><strong>Authorized use only.</strong> Generated for a target you own or are
-     permitted to test.</p>
+  <p class="meta">Generated {{ generated_at }}</p>
+  <p class="notice"><strong>Authorized use only.</strong> Generated for a target
+     you own or are permitted to test. OS family is a heuristic best guess, not
+     fingerprinting; anomaly flags are coarse heuristics, not an IDS verdict.</p>
 
-  <h2>Scan — {{ scan_type | default("(scan)") }} of {{ target | default("(target)") }}</h2>
-  {% if os_family_guess %}
-  <p>OS family (heuristic, best guess): {{ os_family_guess }}</p>
+  {% if scan %}
+  <h2>Scan — {{ scan.scan_type }} of {{ scan.target }}</h2>
+  {% if scan.os_family_guess %}
+  <p>OS family (heuristic, best guess): {{ scan.os_family_guess }}</p>
   {% endif %}
-  <table border="1" cellpadding="4">
-    <thead><tr><th>Port</th><th>State</th><th>Service (hint)</th><th>Banner</th></tr></thead>
+  <table>
+    <thead><tr><th>Port</th><th>Proto</th><th>State</th><th>Service</th><th>Banner</th></tr></thead>
     <tbody>
-      {% for p in ports | default([]) %}
+      {% for p in scan.ports %}
       <tr>
-        <td>{{ p.port }}</td><td>{{ p.state }}</td>
-        <td>{{ p.service_hint or "" }}</td><td>{{ p.banner or "" }}</td>
+        <td>{{ p.port }}</td>
+        <td>{{ p.proto }}</td>
+        <td class="{{ p.state }}">{{ p.state }}</td>
+        <td>{{ p.service_hint or "" }}</td>
+        <td><code>{{ p.banner or "" }}</code></td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  {% endif %}
+
+  {% if traffic %}
+  <h2>Traffic — {{ traffic.packets }} packets / {{ traffic.bytes }} bytes</h2>
+  <table>
+    <thead><tr><th>Source IP</th><th>Packets</th><th>Bytes</th></tr></thead>
+    <tbody>
+      {% for row in traffic.by_ip %}
+      <tr><td>{{ row.ip }}</td><td>{{ row.packets }}</td><td>{{ row.bytes }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if anomalies %}
+  <h2>Anomaly flags (heuristic)</h2>
+  <ul>
+    {% for a in anomalies %}
+    <li><span class="{{ a.severity }}">[{{ a.kind }}]</span> {{ a.detail }}</li>
+    {% endfor %}
+  </ul>
+  {% elif anomalies is not none %}
+  <h2>Anomaly flags (heuristic)</h2>
+  <p>None detected.</p>
+  {% endif %}
 </body>
 </html>

@@ -53,6 +53,12 @@ class PacketSummary:
     proto: str
     length: int
     info: str
+    # Structured fields the analyzer reads (kept off the display string so it
+    # never has to re-parse `info`).
+    sport: int | None = None
+    dport: int | None = None
+    flags: str | None = None  # TCP flags, e.g. "S", "SA"
+    mac: str | None = None  # L2 source (ARP hwsrc) — for spoof detection
 
 
 def _dns_qname(dns: Any) -> str:
@@ -86,7 +92,8 @@ def summarize(pkt: Any) -> PacketSummary:
         op = {1: "who-has", 2: "is-at"}.get(int(arp.op), f"op{arp.op}")
         info = (f"ARP {op} {arp.pdst} tell {arp.psrc}" if int(arp.op) == 1
                 else f"ARP {arp.psrc} is-at {arp.hwsrc}")
-        return PacketSummary(ts, arp.psrc, arp.pdst, "ARP", length, info)
+        return PacketSummary(ts, arp.psrc, arp.pdst, "ARP", length, info,
+                             mac=str(arp.hwsrc))
 
     if pkt.haslayer(IP):
         ip = pkt[IP]
@@ -97,11 +104,14 @@ def summarize(pkt: Any) -> PacketSummary:
         if pkt.haslayer(TCP):
             tcp = pkt[TCP]
             info = f"TCP {src}:{tcp.sport} -> {dst}:{tcp.dport} [{tcp.flags}]"
-            return PacketSummary(ts, src, dst, "TCP", length, info)
+            return PacketSummary(ts, src, dst, "TCP", length, info,
+                                 sport=int(tcp.sport), dport=int(tcp.dport),
+                                 flags=str(tcp.flags))
         if pkt.haslayer(UDP):
             udp = pkt[UDP]
             info = f"UDP {src}:{udp.sport} -> {dst}:{udp.dport}"
-            return PacketSummary(ts, src, dst, "UDP", length, info)
+            return PacketSummary(ts, src, dst, "UDP", length, info,
+                                 sport=int(udp.sport), dport=int(udp.dport))
         if pkt.haslayer(ICMP):
             icmp = pkt[ICMP]
             info = f"ICMP {src} -> {dst} type={icmp.type} code={icmp.code}"

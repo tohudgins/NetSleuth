@@ -3,20 +3,32 @@
 Wires the modules together behind an argparse interface. Defaults to a safe
 local target (127.0.0.1) per CLAUDE.md rule #5 — authorized use only.
 
-Exposes Phase 1 scanning and Phase 2 sniffing; --scan-then-sniff (integration)
-lands in Phase 3.
+Phase 1 scanning, Phase 2 sniffing, and Phase 3 integration: --scan-then-sniff
+runs a scan, then sniffs the target's open ports behind a live dashboard, with
+anomaly analysis and JSON/HTML reporting.
 """
 
 from __future__ import annotations
 
 import argparse
 import time
+from collections import deque
 from typing import Any
 
+from rich.live import Live
+
 from netsleuth import ui
+from netsleuth.analyzer import AnomalyFlag, analyze
 from netsleuth.privileges import privilege_notice
-from netsleuth.scanner import Protocol, scan
-from netsleuth.sniffer import PacketSummary, Sniffer, capture_available, hexdump
+from netsleuth.reporter import build_report, write_report
+from netsleuth.scanner import Protocol, ScanReport, scan
+from netsleuth.sniffer import (
+    PacketSummary,
+    Sniffer,
+    TrafficStats,
+    capture_available,
+    hexdump,
+)
 
 
 def _parse_ports(spec: str) -> list[int]:
@@ -49,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--connect", action="store_true",
                    help="force unprivileged connect scan even if privileged")
 
-    sniff_grp = p.add_argument_group("sniffer (Phase 2 — needs root/Administrator)")
+    sniff_grp = p.add_argument_group("sniffer (needs root/Administrator)")
     sniff_grp.add_argument("--sniff", action="store_true",
                            help="live packet capture instead of scanning")
     sniff_grp.add_argument("--iface", default=None, help="capture interface")
@@ -62,28 +74,54 @@ def build_parser() -> argparse.ArgumentParser:
     sniff_grp.add_argument("--hex", action="store_true",
                            help="hex-dump each captured packet")
 
-    # Declared for the build story; implemented in Phase 3.
-    p.add_argument("--scan-then-sniff", action="store_true",
-                   help="(Phase 3) sniff the target's open ports after scanning")
+    intg_grp = p.add_argument_group("integration + reporting")
+    intg_grp.add_argument("--scan-then-sniff", action="store_true",
+                          help="scan, then sniff the target's open ports (live dashboard)")
+    intg_grp.add_argument("--report-dir", default=None,
+                          help="write JSON + HTML report into this directory")
     return p
 
 
-def run_scan(args: argparse.Namespace) -> int:
-    ports = _parse_ports(args.ports)
-    proto = Protocol.UDP if args.udp else Protocol.TCP
+# --- shared helpers -------------------------------------------------------- #
 
+def _scan(args: argparse.Namespace, proto: Protocol, *, show_progress: bool) -> ScanReport:
+    ports = _parse_ports(args.ports)
+    if not show_progress:
+        return scan(args.target, ports, proto=proto, timeout=args.timeout,
+                    max_workers=args.workers, force_connect=args.connect)
     progress = ui.make_scan_progress()
     with progress:
         task = progress.add_task(f"scanning {args.target}", total=len(ports))
-        report = scan(
-            args.target,
-            ports,
-            proto=proto,
-            timeout=args.timeout,
-            max_workers=args.workers,
-            force_connect=args.connect,
+        return scan(
+            args.target, ports, proto=proto, timeout=args.timeout,
+            max_workers=args.workers, force_connect=args.connect,
             on_result=lambda _r: progress.advance(task),
         )
+
+
+def _write_reports(
+    args: argparse.Namespace,
+    *,
+    scan_report: ScanReport | None = None,
+    stats: TrafficStats | None = None,
+    anomalies: list[AnomalyFlag] | None = None,
+    default_dir: str | None = None,
+) -> None:
+    out = args.report_dir or default_dir
+    if not out:
+        return
+    report = build_report(scan=scan_report, stats=stats, anomalies=anomalies)
+    paths = write_report(out, report)
+    ui.console.print(
+        f"Reports written: {paths['json']} and {paths['html']}", style="green"
+    )
+
+
+# --- modes ----------------------------------------------------------------- #
+
+def run_scan(args: argparse.Namespace) -> int:
+    proto = Protocol.UDP if args.udp else Protocol.TCP
+    report = _scan(args, proto, show_progress=True)
 
     if report.os_family_guess:
         ui.console.print(
@@ -93,6 +131,8 @@ def run_scan(args: argparse.Namespace) -> int:
     ui.console.print(ui.render_scan_table(report))
     if not report.open_ports:
         ui.console.print("  no open ports found", style="dim")
+
+    _write_reports(args, scan_report=report)
     return 0
 
 
@@ -110,12 +150,8 @@ def run_sniff(args: argparse.Namespace) -> int:
         if args.hex:
             ui.console.print(hexdump(bytes(raw_pkt)), style="dim")
 
-    sniffer = Sniffer(
-        iface=args.iface,
-        bpf_filter=args.bpf,
-        count=args.count,
-        on_packet=_on_packet,
-    )
+    sniffer = Sniffer(iface=args.iface, bpf_filter=args.bpf, count=args.count,
+                      on_packet=_on_packet)
     limit = f"{args.count} packets" if args.count else f"{args.duration:g}s"
     ui.console.print(f"Capturing ({limit}) — Ctrl-C to stop early…", style="cyan")
 
@@ -129,7 +165,64 @@ def run_sniff(args: argparse.Namespace) -> int:
     finally:
         sniffer.stop()
 
+    anomalies = analyze(sniffer.packets)
     ui.console.print(ui.render_traffic_table(sniffer.stats))
+    ui.console.print(ui.render_anomalies(anomalies))
+    _write_reports(args, stats=sniffer.stats, anomalies=anomalies)
+    return 0
+
+
+def run_scan_then_sniff(args: argparse.Namespace) -> int:
+    # Always TCP for the scan stage so we have ports to focus the capture on.
+    report = _scan(args, Protocol.TCP, show_progress=True)
+    open_ports = report.open_ports
+    ui.console.print(ui.render_scan_table(report))
+
+    if not open_ports:
+        ui.console.print("No open ports — nothing to sniff.", style="dim")
+        _write_reports(args, scan_report=report, default_dir="reports")
+        return 0
+
+    if not capture_available():
+        ui.console.print(
+            "Open ports found, but live capture needs root/Administrator. "
+            "Re-run with sudo to sniff them; writing scan-only report.",
+            style="bold yellow",
+        )
+        _write_reports(args, scan_report=report, default_dir="reports")
+        return 0
+
+    ports_clause = " or ".join(f"tcp port {p}" for p in open_ports)
+    bpf = f"host {args.target} and ({ports_clause})"
+    recent: deque[PacketSummary] = deque(maxlen=12)
+    sniffer = Sniffer(iface=args.iface, bpf_filter=bpf,
+                      on_packet=lambda s, _raw: recent.append(s))
+
+    ui.console.print(
+        f"Sniffing {args.target} ports {open_ports} for {args.duration:g}s "
+        "— Ctrl-C to stop early…", style="cyan",
+    )
+    anomalies: list[AnomalyFlag] = []
+    sniffer.start()
+    deadline = time.monotonic() + args.duration
+    with Live(ui.render_dashboard(report, sniffer.stats, anomalies, list(recent)),
+              console=ui.console, refresh_per_second=4) as live:
+        try:
+            while sniffer.running and time.monotonic() < deadline:
+                time.sleep(0.25)
+                anomalies = analyze(sniffer.packets)
+                live.update(ui.render_dashboard(
+                    report, sniffer.stats, anomalies, list(recent)))
+        except KeyboardInterrupt:
+            pass
+        finally:
+            sniffer.stop()
+            anomalies = analyze(sniffer.packets)
+            live.update(ui.render_dashboard(
+                report, sniffer.stats, anomalies, list(recent)))
+
+    _write_reports(args, scan_report=report, stats=sniffer.stats,
+                   anomalies=anomalies, default_dir="reports")
     return 0
 
 
@@ -137,16 +230,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     ui.print_privilege_notice(privilege_notice())
 
+    if args.scan_then_sniff:
+        return run_scan_then_sniff(args)
     if args.sniff:
         return run_sniff(args)
-
-    rc = run_scan(args)
-    if args.scan_then_sniff:
-        ui.console.print(
-            "\n[--scan-then-sniff is a Phase 3 feature — not yet implemented]",
-            style="dim",
-        )
-    return rc
+    return run_scan(args)
 
 
 if __name__ == "__main__":

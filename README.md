@@ -39,10 +39,18 @@ python main.py 127.0.0.1 -p 53,123 --udp
 # live packet capture for 10s (needs sudo / Administrator)
 sudo python main.py --sniff --duration 10
 sudo python main.py --sniff --filter "tcp port 80" --count 50 --hex
+
+# integrated: scan, then sniff the open ports behind a live dashboard,
+# with anomaly flags + a JSON/HTML report (written to reports/)
+sudo python main.py 127.0.0.1 --scan-then-sniff --duration 15
+
+# write a report from any mode
+python main.py 127.0.0.1 -p 1-1024 --report-dir reports
 ```
 
 Run unprivileged and NetSleuth **warns and degrades** — it falls back to a TCP
-connect scan and skips live capture rather than crashing.
+connect scan and skips live capture rather than crashing (the scan still runs
+and a scan-only report is still written).
 
 ## Practice legally
 
@@ -53,5 +61,5 @@ target out of the box. See `lab/README.md`.
 
 - [x] Phase 1 — Scanner (connect + SYN, UDP, banner grab, OS family heuristic)
 - [x] Phase 2 — Sniffer (threaded scapy capture, TCP/UDP/ICMP/ARP/DNS decode, per-IP stats)
-- [ ] Phase 3 — Integration, analyzer, dashboard, JSON/HTML reports
+- [x] Phase 3 — Integration (--scan-then-sniff), analyzer anomaly flags, live dashboard, JSON/HTML reports
 - [ ] Phase 4 — Stretch (PCAP import, honeypot mode, CVE lookup)
