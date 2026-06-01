@@ -45,11 +45,24 @@
         <td>{{ p.proto }}</td>
         <td class="state-{{ p.state | replace('|', '-') }}">{{ p.state }}</td>
         <td>{{ p.service_hint or "" }}</td>
-        <td><code>{{ p.banner or "" }}</code></td>
+        <td>
+          <code>{{ p.banner or "" }}</code>
+          {% if p.cves %}
+          <ul>
+            {% for c in p.cves %}
+            <li><span class="warning">{{ c.id }}</span>{% if c.cvss %} (CVSS {{ c.cvss }}){% endif %}: {{ c.summary }}</li>
+            {% endfor %}
+          </ul>
+          {% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  {% if scan.ports | selectattr('cves') | list %}
+  <p class="meta">CVEs are keyword-matched candidates from NVD — verify before
+     acting; they are not a confirmed-vulnerable verdict.</p>
+  {% endif %}
   {% endif %}
 
   {% if traffic %}

@@ -71,6 +71,25 @@ python main.py --pcap path/to/real-world.pcap   # e.g. a malware-traffic capture
 The analyzer flags port-scan, SYN-flood, and ARP-spoof patterns and writes the
 same JSON/HTML report as the live modes.
 
+### Alert forwarding + CVE lookup
+
+Forward detected anomalies into your alerting pipeline (a honeypot, a SIEM, a
+log shipper — all just sinks for the same JSON), and look up candidate CVEs for
+detected service versions:
+
+```bash
+# forward anomaly flags as JSON-lines / to a webhook / to syslog
+python main.py --pcap capture.pcap --alert-jsonl alerts.jsonl
+python main.py --pcap capture.pcap --alert-webhook https://example/hook
+sudo python main.py --scan-then-sniff 127.0.0.1 --alert-syslog localhost:514
+
+# look up candidate CVEs for detected banners (queries NVD; opt-in, fails soft offline)
+python main.py 127.0.0.1 -p 80,22 --cve --report-dir reports
+```
+
+CVE results are keyword-matched *candidates* from NVD — verify before acting,
+they are not a confirmed-vulnerable verdict.
+
 ## Practice legally
 
 A `lab/` directory provides deliberately-open containers so you have a legal
@@ -81,4 +100,4 @@ target out of the box. See `lab/README.md`.
 - [x] Phase 1 — Scanner (connect + SYN, UDP, banner grab, OS family heuristic)
 - [x] Phase 2 — Sniffer (threaded scapy capture, TCP/UDP/ICMP/ARP/DNS decode, per-IP stats)
 - [x] Phase 3 — Integration (--scan-then-sniff), analyzer anomaly flags, live dashboard, JSON/HTML reports
-- [~] Phase 4 — PCAP import + attack-sample lab (done); alert forwarding + CVE lookup (in progress)
+- [x] Phase 4 — PCAP import, attack-sample lab, alert forwarding (JSON-lines/webhook/syslog), CVE lookup

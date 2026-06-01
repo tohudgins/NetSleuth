@@ -29,13 +29,19 @@ def build_report(
     scan: ScanReport | None = None,
     stats: TrafficStats | None = None,
     anomalies: list[AnomalyFlag] | None = None,
+    cves: dict[int, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the unified, JSON-serialisable report structure."""
+    """Assemble the unified, JSON-serialisable report structure.
+
+    ``cves`` maps a port to a list of already-serialised CVE dicts (id/summary/
+    cvss); they are attached to the matching port entry.
+    """
     report: dict[str, Any] = {
         "tool": "NetSleuth",
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "authorized_use_only": True,
     }
+    cves = cves or {}
 
     if scan is not None:
         report["scan"] = {
@@ -51,6 +57,7 @@ def build_report(
                     "state": p.state.value,
                     "service_hint": p.service_hint,
                     "banner": p.banner,
+                    "cves": cves.get(p.port, []),
                 }
                 for p in scan.ports
             ],

@@ -109,6 +109,20 @@ def render_traffic_table(stats: TrafficStats, top: int = 10) -> Table:
     return table
 
 
+def render_cve_table(cve_by_port: dict[int, list]) -> Table:
+    """Build a rich Table of candidate CVEs per port (returned for testing)."""
+    table = Table(title="Candidate CVEs (keyword match — verify before acting)",
+                  header_style="bold red", expand=False)
+    table.add_column("Port", justify="right")
+    table.add_column("CVE")
+    table.add_column("CVSS", justify="right")
+    table.add_column("Summary", overflow="fold")
+    for port in sorted(cve_by_port):
+        for entry in cve_by_port[port]:
+            table.add_row(str(port), entry.id, entry.cvss or "—", entry.summary)
+    return table
+
+
 def render_anomalies(anomalies: list[AnomalyFlag]) -> Panel:
     """Panel listing heuristic anomaly flags (or an all-clear)."""
     if not anomalies:

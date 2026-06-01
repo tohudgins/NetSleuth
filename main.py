@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import argparse
 import time
+from dataclasses import asdict
 from typing import Any
 
 from rich.live import Live
 
 from netsleuth import ui
+from netsleuth.alerts import emit_alerts
 from netsleuth.analyzer import AnomalyFlag, analyze
+from netsleuth.cve import enrich_scan
 from netsleuth.pcap import analyze_pcap
 from netsleuth.privileges import privilege_notice
 from netsleuth.reporter import build_report, write_report
@@ -81,6 +84,17 @@ def build_parser() -> argparse.ArgumentParser:
                           help="analyze a saved capture file offline (no privileges)")
     intg_grp.add_argument("--report-dir", default=None,
                           help="write JSON + HTML report into this directory")
+    intg_grp.add_argument("--cve", action="store_true",
+                          help="look up candidate CVEs for detected service versions (NVD)")
+
+    alert_grp = p.add_argument_group("alert forwarding (anomaly flags)")
+    alert_grp.add_argument("--alert-jsonl", default=None, metavar="FILE",
+                           help="append anomaly flags as JSON-lines to FILE")
+    alert_grp.add_argument("--alert-webhook", default=None, metavar="URL",
+                           help="HTTP POST anomaly flags as JSON to URL")
+    alert_grp.add_argument("--alert-syslog", nargs="?", const="localhost:514",
+                           default=None, metavar="HOST:PORT",
+                           help="send anomaly flags to syslog (default localhost:514)")
     return p
 
 
@@ -107,16 +121,49 @@ def _write_reports(
     scan_report: ScanReport | None = None,
     stats: TrafficStats | None = None,
     anomalies: list[AnomalyFlag] | None = None,
+    cves: dict[int, list[dict[str, Any]]] | None = None,
     default_dir: str | None = None,
 ) -> None:
     out = args.report_dir or default_dir
     if not out:
         return
-    report = build_report(scan=scan_report, stats=stats, anomalies=anomalies)
+    report = build_report(scan=scan_report, stats=stats, anomalies=anomalies, cves=cves)
     paths = write_report(out, report)
     ui.console.print(
         f"Reports written: {paths['json']} and {paths['html']}", style="green"
     )
+
+
+def _forward_alerts(args: argparse.Namespace, anomalies: list[AnomalyFlag]) -> None:
+    """Emit anomaly flags to any configured sinks (jsonl/webhook/syslog)."""
+    syslog = None
+    if args.alert_syslog:
+        host, _, port = args.alert_syslog.partition(":")
+        syslog = (host or "localhost", int(port) if port else 514)
+    results = emit_alerts(
+        anomalies,
+        jsonl_path=args.alert_jsonl,
+        webhook=args.alert_webhook,
+        syslog=syslog,
+    )
+    for line in results:
+        ui.console.print(f"alert: {line}", style="dim")
+
+
+def _cve_enrich(
+    args: argparse.Namespace, report: ScanReport
+) -> dict[int, list[dict[str, Any]]]:
+    """Look up candidate CVEs for open ports; print a table; return serialised."""
+    if not args.cve:
+        return {}
+    try:
+        by_port = enrich_scan(report)
+    except OSError as exc:  # offline / API error — fail soft
+        ui.console.print(f"CVE lookup skipped (network error: {exc})", style="yellow")
+        return {}
+    if by_port:
+        ui.console.print(ui.render_cve_table(by_port))
+    return {port: [asdict(e) for e in entries] for port, entries in by_port.items()}
 
 
 # --- modes ----------------------------------------------------------------- #
@@ -134,7 +181,8 @@ def run_scan(args: argparse.Namespace) -> int:
     if not report.open_ports:
         ui.console.print("  no open ports found", style="dim")
 
-    _write_reports(args, scan_report=report)
+    cves = _cve_enrich(args, report)
+    _write_reports(args, scan_report=report, cves=cves)
     return 0
 
 
@@ -170,6 +218,7 @@ def run_sniff(args: argparse.Namespace) -> int:
     anomalies = analyze(list(sniffer.packets))
     ui.console.print(ui.render_traffic_table(sniffer.stats))
     ui.console.print(ui.render_anomalies(anomalies))
+    _forward_alerts(args, anomalies)
     _write_reports(args, stats=sniffer.stats, anomalies=anomalies)
     return 0
 
@@ -179,6 +228,7 @@ def run_pcap(args: argparse.Namespace) -> int:
     result = analyze_pcap(args.pcap)
     ui.console.print(ui.render_traffic_table(result.stats))
     ui.console.print(ui.render_anomalies(result.anomalies))
+    _forward_alerts(args, result.anomalies)
     _write_reports(args, stats=result.stats, anomalies=result.anomalies)
     return 0
 
@@ -188,10 +238,11 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
     report = _scan(args, Protocol.TCP, show_progress=True)
     open_ports = report.open_ports
     ui.console.print(ui.render_scan_table(report))
+    cves = _cve_enrich(args, report)
 
     if not open_ports:
         ui.console.print("No open ports — nothing to sniff.", style="dim")
-        _write_reports(args, scan_report=report, default_dir="reports")
+        _write_reports(args, scan_report=report, cves=cves, default_dir="reports")
         return 0
 
     if not capture_available():
@@ -200,7 +251,7 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
             "Re-run with sudo to sniff them; writing scan-only report.",
             style="bold yellow",
         )
-        _write_reports(args, scan_report=report, default_dir="reports")
+        _write_reports(args, scan_report=report, cves=cves, default_dir="reports")
         return 0
 
     ports_clause = " or ".join(f"tcp port {p}" for p in open_ports)
@@ -235,8 +286,9 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
             sniffer.stop()
             live.update(_frame())
 
+    _forward_alerts(args, anomalies)
     _write_reports(args, scan_report=report, stats=sniffer.stats,
-                   anomalies=anomalies, default_dir="reports")
+                   anomalies=anomalies, cves=cves, default_dir="reports")
     return 0
 
 
