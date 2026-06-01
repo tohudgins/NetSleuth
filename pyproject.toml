@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netsleuth"
+version = "0.1.0"
+description = "Defensive, educational network port scanner + packet sniffer. Authorized use only."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "scapy>=2.5",
+    "rich>=13.0",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff", "mypy"]
+
+[project.scripts]
+netsleuth = "main:main"
+
+[tool.setuptools]
+packages = ["netsleuth"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+
+# scapy ships no type stubs and populates scapy.all (IP, TCP, sr1, ...)
+# dynamically at runtime, so static analysis can't see those names. Skip it
+# rather than littering the source with per-line ignores.
+[[tool.mypy.overrides]]
+module = "scapy.*"
+ignore_missing_imports = true
+follow_imports = "skip"

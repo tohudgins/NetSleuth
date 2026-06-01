@@ -1,0 +1,20 @@
+# NetSleuth practice lab — LEGAL targets you control.
+#
+# These containers deliberately expose common services on localhost so you can
+# exercise NetSleuth against something you own. Bring up with:
+#
+#     docker compose -f lab/docker-compose.yml up -d
+#
+# then scan 127.0.0.1. Tear down with `docker compose ... down`.
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "127.0.0.1:8080:80"   # HTTP — banner grab target
+
+  ftp:
+    image: delfer/alpine-ftp-server
+    ports:
+      - "127.0.0.1:2121:21"   # FTP — speaks-first banner target
+    environment:
+      USERS: "lab|labpass"
