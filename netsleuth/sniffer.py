@@ -24,8 +24,15 @@ from .privileges import can_raw_socket
 try:
     from scapy.all import ARP, DNS, ICMP, IP, TCP, UDP, sniff
     from scapy.all import conf as scapy_conf
+    from scapy.error import Scapy_Exception
 
     scapy_conf.verb = 0
+    # We only inspect our own host's traffic, never other devices' frames, so we
+    # do NOT need promiscuous mode. Disabling it also avoids a hard failure on
+    # macOS interfaces (e.g. en0) that reject BIOCPROMISC ("Cannot set
+    # promiscuous mode"). This keeps capture working and is the right default for
+    # a defensive tool.
+    scapy_conf.sniff_promisc = 0
     # scapy 2.7 deprecated direct DNS qd/an/ns/ar access; the API still works and
     # _dns_info() handles both shapes. Silence only that one third-party warning
     # so a live DNS capture doesn't print noise.
@@ -36,6 +43,7 @@ try:
     _SCAPY_AVAILABLE = True
 except Exception:  # pragma: no cover - environment dependent
     _SCAPY_AVAILABLE = False
+    Scapy_Exception = Exception
 
 
 def capture_available() -> bool:
@@ -189,6 +197,7 @@ class Sniffer:
         self.on_packet = on_packet
         self.packets: list[PacketSummary] = []
         self.stats = TrafficStats()
+        self.error: Exception | None = None  # set if the capture thread fails
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -204,15 +213,22 @@ class Sniffer:
 
     def _run(self) -> None:
         # Loop so a quiet network still lets us notice the stop flag quickly.
-        while not self._stop.is_set():
-            sniff(
-                prn=self._handle,
-                store=False,
-                filter=self.bpf_filter,
-                iface=self.iface,
-                timeout=0.5,
-                stop_filter=lambda _p: self._stop.is_set(),
-            )
+        # A capture-startup failure (bad interface, missing privileges, an
+        # unsupported BPF feature) is recorded and stops the thread cleanly
+        # instead of dumping a traceback from the worker.
+        try:
+            while not self._stop.is_set():
+                sniff(
+                    prn=self._handle,
+                    store=False,
+                    filter=self.bpf_filter,
+                    iface=self.iface,
+                    timeout=0.5,
+                    stop_filter=lambda _p: self._stop.is_set(),
+                )
+        except (Scapy_Exception, OSError, PermissionError) as exc:
+            self.error = exc
+            self._stop.set()
 
     @property
     def running(self) -> bool:

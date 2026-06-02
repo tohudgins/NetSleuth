@@ -217,6 +217,10 @@ def run_sniff(args: argparse.Namespace) -> int:
     finally:
         sniffer.stop()
 
+    if sniffer.error is not None:
+        ui.console.print(f"Capture failed: {sniffer.error}", style="bold red")
+        return 1
+
     anomalies = analyze(list(sniffer.packets))
     ui.console.print(ui.render_traffic_table(sniffer.stats))
     ui.console.print(ui.render_anomalies(anomalies))
@@ -292,6 +296,9 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
         finally:
             sniffer.stop()
             live.update(_frame())
+
+    if sniffer.error is not None:
+        ui.console.print(f"Capture failed: {sniffer.error}", style="bold red")
 
     _forward_alerts(args, anomalies)
     _write_reports(args, scan_report=report, stats=sniffer.stats,

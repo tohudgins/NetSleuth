@@ -103,3 +103,24 @@ def test_sniffer_thread_lifecycle(monkeypatch):
     assert sniffer.stats.packets >= 1
     assert len(seen) >= 1
     assert sniffer.packets[0].proto == "UDP"
+
+
+def test_sniffer_captures_thread_error(monkeypatch):
+    """A capture-startup failure is recorded, not raised from the worker."""
+    import netsleuth.sniffer as snf
+
+    monkeypatch.setattr(snf, "_SCAPY_AVAILABLE", True)
+    monkeypatch.setattr(snf, "can_raw_socket", lambda: True)
+
+    def boom_sniff(**_kw):
+        raise snf.Scapy_Exception("Cannot set promiscuous mode on interface (en0)!")
+
+    monkeypatch.setattr(snf, "sniff", boom_sniff)
+
+    sniffer = snf.Sniffer()
+    sniffer.start()
+    sniffer.stop(timeout=2.0)
+
+    assert not sniffer.running
+    assert sniffer.error is not None
+    assert "promiscuous" in str(sniffer.error)
