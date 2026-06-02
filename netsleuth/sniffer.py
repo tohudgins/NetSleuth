@@ -67,6 +67,8 @@ class PacketSummary:
     dport: int | None = None
     flags: str | None = None  # TCP flags, e.g. "S", "SA"
     mac: str | None = None  # L2 source (ARP hwsrc) — for spoof detection
+    arp_op: str | None = None  # "who-has" | "is-at" — for spoof detection
+    qname: str | None = None  # DNS question name — for tunneling/exfil heuristics
 
 
 def _dns_qname(dns: Any) -> str:
@@ -91,7 +93,8 @@ def _l4_summary(
 ) -> PacketSummary | None:
     """TCP/UDP/DNS summary shared by IPv4 and IPv6; None if not one of those."""
     if pkt.haslayer(DNS):
-        return PacketSummary(ts, src, dst, "DNS", length, _dns_info(pkt))
+        return PacketSummary(ts, src, dst, "DNS", length, _dns_info(pkt),
+                             qname=_dns_qname(pkt[DNS]) or None)
     if pkt.haslayer(TCP):
         tcp = pkt[TCP]
         info = f"TCP {src}:{tcp.sport} -> {dst}:{tcp.dport} [{tcp.flags}]"
@@ -122,7 +125,7 @@ def summarize(pkt: Any) -> PacketSummary:
         info = (f"ARP {op} {arp.pdst} tell {arp.psrc}" if int(arp.op) == 1
                 else f"ARP {arp.psrc} is-at {arp.hwsrc}")
         return PacketSummary(ts, arp.psrc, arp.pdst, "ARP", length, info,
-                             mac=str(arp.hwsrc))
+                             mac=str(arp.hwsrc), arp_op=op)
 
     if pkt.haslayer(IP):
         ip = pkt[IP]
