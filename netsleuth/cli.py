@@ -21,6 +21,8 @@ from netsleuth import ui
 from netsleuth.alerts import emit_alerts
 from netsleuth.analyzer import AnomalyFlag, analyze
 from netsleuth.cve import enrich_scan
+from netsleuth.defense import DefenseAlert, DefenseConfig, detect_spoofing
+from netsleuth.discovery import DiscoveryReport, discover
 from netsleuth.pcap import analyze_pcap
 from netsleuth.privileges import privilege_notice
 from netsleuth.reporter import build_report, write_report
@@ -80,6 +82,9 @@ def build_parser() -> argparse.ArgumentParser:
                            help="hex-dump each captured packet")
 
     intg_grp = p.add_argument_group("integration + reporting")
+    intg_grp.add_argument("--discover", action="store_true",
+                          help="map live hosts on a subnet (target may be a CIDR, "
+                          "e.g. 192.168.1.0/24); ARP sweep if privileged else TCP ping")
     intg_grp.add_argument("--scan-then-sniff", action="store_true",
                           help="scan, then sniff the target's open ports (live dashboard)")
     intg_grp.add_argument("--pcap", default=None, metavar="FILE",
@@ -88,6 +93,12 @@ def build_parser() -> argparse.ArgumentParser:
                           help="write JSON + HTML report into this directory")
     intg_grp.add_argument("--cve", action="store_true",
                           help="look up candidate CVEs for detected service versions (NVD)")
+    intg_grp.add_argument("--gateway", default=None, metavar="IP",
+                          help="treat this IP as the gateway: ARP-spoofing alerts "
+                          "against it are escalated to critical")
+    intg_grp.add_argument("--known-hosts", default=None, metavar="IP,IP,…",
+                          help="baseline of known hosts; sources not listed are "
+                          "flagged as new devices during capture/pcap analysis")
 
     alert_grp = p.add_argument_group("alert forwarding (anomaly flags)")
     alert_grp.add_argument("--alert-jsonl", default=None, metavar="FILE",
@@ -124,32 +135,51 @@ def _write_reports(
     stats: TrafficStats | None = None,
     anomalies: list[AnomalyFlag] | None = None,
     cves: dict[int, list[dict[str, Any]]] | None = None,
+    discovery: DiscoveryReport | None = None,
+    defense: list[DefenseAlert] | None = None,
     default_dir: str | None = None,
 ) -> None:
     out = args.report_dir or default_dir
     if not out:
         return
-    report = build_report(scan=scan_report, stats=stats, anomalies=anomalies, cves=cves)
+    report = build_report(scan=scan_report, stats=stats, anomalies=anomalies,
+                          cves=cves, discovery=discovery, defense=defense)
     paths = write_report(out, report)
     ui.console.print(
         f"Reports written: {paths['json']} and {paths['html']}", style="green"
     )
 
 
-def _forward_alerts(args: argparse.Namespace, anomalies: list[AnomalyFlag]) -> None:
-    """Emit anomaly flags to any configured sinks (jsonl/webhook/syslog)."""
+def _forward_alerts(
+    args: argparse.Namespace,
+    anomalies: list[AnomalyFlag],
+    defense: list[DefenseAlert] | None = None,
+) -> None:
+    """Emit anomaly + spoofing alerts to any configured sinks (jsonl/webhook/syslog)."""
     syslog = None
     if args.alert_syslog:
         host, _, port = args.alert_syslog.partition(":")
         syslog = (host or "localhost", int(port) if port else 514)
     results = emit_alerts(
-        anomalies,
+        [*anomalies, *(defense or [])],
         jsonl_path=args.alert_jsonl,
         webhook=args.alert_webhook,
         syslog=syslog,
     )
     for line in results:
         ui.console.print(f"alert: {line}", style="dim")
+
+
+def _defense_config(args: argparse.Namespace) -> DefenseConfig:
+    """Build the spoofing-detector config, escalating the gateway to critical."""
+    return DefenseConfig(critical_ips={args.gateway} if args.gateway else set())
+
+
+def _known_hosts(args: argparse.Namespace) -> set[str] | None:
+    """Parse --known-hosts into a baseline set, or None when unset."""
+    if not args.known_hosts:
+        return None
+    return {h.strip() for h in args.known_hosts.split(",") if h.strip()}
 
 
 def _cve_enrich(
@@ -188,6 +218,20 @@ def run_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_discover(args: argparse.Namespace) -> int:
+    ui.console.print(f"Discovering hosts on {args.target}…", style="cyan")
+    try:
+        report = discover(args.target, iface=args.iface)
+    except (OSError, ValueError, RuntimeError) as exc:
+        ui.console.print(f"Discovery failed: {exc}", style="bold red")
+        return 1
+    ui.console.print(ui.render_discovery_table(report))
+    if not report.hosts:
+        ui.console.print("  no hosts responded", style="dim")
+    _write_reports(args, discovery=report)
+    return 0
+
+
 def run_sniff(args: argparse.Namespace) -> int:
     if not capture_available():
         ui.console.print(
@@ -221,11 +265,14 @@ def run_sniff(args: argparse.Namespace) -> int:
         ui.console.print(f"Capture failed: {sniffer.error}", style="bold red")
         return 1
 
-    anomalies = analyze(list(sniffer.packets))
+    packets = list(sniffer.packets)
+    anomalies = analyze(packets, known_hosts=_known_hosts(args))
+    spoofing = detect_spoofing(packets, config=_defense_config(args))
     ui.console.print(ui.render_traffic_table(sniffer.stats))
+    ui.console.print(ui.render_defense(spoofing))
     ui.console.print(ui.render_anomalies(anomalies))
-    _forward_alerts(args, anomalies)
-    _write_reports(args, stats=sniffer.stats, anomalies=anomalies)
+    _forward_alerts(args, anomalies, spoofing)
+    _write_reports(args, stats=sniffer.stats, anomalies=anomalies, defense=spoofing)
     return 0
 
 
@@ -236,10 +283,14 @@ def run_pcap(args: argparse.Namespace) -> int:
     except (OSError, ValueError, RuntimeError) as exc:
         ui.console.print(f"Could not read capture: {exc}", style="bold red")
         return 1
+    spoofing = detect_spoofing(result.packets, config=_defense_config(args))
+    anomalies = analyze(result.packets, known_hosts=_known_hosts(args))
     ui.console.print(ui.render_traffic_table(result.stats))
-    ui.console.print(ui.render_anomalies(result.anomalies))
-    _forward_alerts(args, result.anomalies)
-    _write_reports(args, stats=result.stats, anomalies=result.anomalies)
+    ui.console.print(ui.render_defense(spoofing))
+    ui.console.print(ui.render_anomalies(anomalies))
+    _forward_alerts(args, anomalies, spoofing)
+    _write_reports(args, stats=result.stats, anomalies=anomalies,
+                   defense=spoofing)
     return 0
 
 
@@ -276,13 +327,18 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
         "— Ctrl-C to stop early…", style="cyan",
     )
     anomalies: list[AnomalyFlag] = []
+    spoofing: list[DefenseAlert] = []
+
+    known = _known_hosts(args)
+    defense_cfg = _defense_config(args)
 
     def _frame() -> Any:
-        nonlocal anomalies
+        nonlocal anomalies, spoofing
         snapshot = list(sniffer.packets)  # atomic copy of the capture buffer
-        anomalies = analyze(snapshot)
+        anomalies = analyze(snapshot, known_hosts=known)
+        spoofing = detect_spoofing(snapshot, config=defense_cfg)
         return ui.render_dashboard(report, sniffer.stats, anomalies, snapshot[-12:],
-                                   show_closed=args.show_closed)
+                                   defense=spoofing, show_closed=args.show_closed)
 
     sniffer.start()
     deadline = time.monotonic() + args.duration
@@ -300,9 +356,10 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
     if sniffer.error is not None:
         ui.console.print(f"Capture failed: {sniffer.error}", style="bold red")
 
-    _forward_alerts(args, anomalies)
+    _forward_alerts(args, anomalies, spoofing)
     _write_reports(args, scan_report=report, stats=sniffer.stats,
-                   anomalies=anomalies, cves=cves, default_dir="reports")
+                   anomalies=anomalies, cves=cves, defense=spoofing,
+                   default_dir="reports")
     return 0
 
 
@@ -314,6 +371,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_pcap(args)
 
     ui.print_privilege_notice(privilege_notice())
+    if args.discover:
+        return run_discover(args)
     if args.scan_then_sniff:
         return run_scan_then_sniff(args)
     if args.sniff:

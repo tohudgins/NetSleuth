@@ -24,18 +24,24 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .analyzer import AnomalyFlag
+from .defense import DefenseAlert
+
+# Anomaly flags and defense alerts are structurally identical (kind / severity /
+# detail), so the whole forwarding pipeline treats them uniformly — a MITM
+# alert reaches your SIEM the same way a port-scan flag does.
+Alert = AnomalyFlag | DefenseAlert
 
 
-def _as_dicts(anomalies: list[AnomalyFlag]) -> list[dict[str, str]]:
-    return [asdict(a) for a in anomalies]
+def _as_dicts(alerts: list[Alert]) -> list[dict[str, str]]:
+    return [asdict(a) for a in alerts]
 
 
-def to_jsonl(anomalies: list[AnomalyFlag]) -> str:
+def to_jsonl(alerts: list[Alert]) -> str:
     """Render flags as JSON-lines (one compact JSON object per line)."""
-    return "\n".join(json.dumps(d, sort_keys=True) for d in _as_dicts(anomalies))
+    return "\n".join(json.dumps(d, sort_keys=True) for d in _as_dicts(alerts))
 
 
-def write_jsonl(path: str | Path, anomalies: list[AnomalyFlag]) -> Path:
+def write_jsonl(path: str | Path, anomalies: list[Alert]) -> Path:
     """Append flags as JSON-lines to a file (created if absent)."""
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -45,7 +51,7 @@ def write_jsonl(path: str | Path, anomalies: list[AnomalyFlag]) -> Path:
     return out
 
 
-def post_webhook(url: str, anomalies: list[AnomalyFlag], *, timeout: float = 5.0) -> int:
+def post_webhook(url: str, anomalies: list[Alert], *, timeout: float = 5.0) -> int:
     """POST flags as a JSON array; returns the HTTP status code."""
     payload = json.dumps({"tool": "NetSleuth", "anomalies": _as_dicts(anomalies)})
     req = urllib.request.Request(
@@ -57,7 +63,7 @@ def post_webhook(url: str, anomalies: list[AnomalyFlag], *, timeout: float = 5.0
 
 
 def send_syslog(
-    anomalies: list[AnomalyFlag],
+    anomalies: list[Alert],
     *,
     address: tuple[str, int] = ("localhost", 514),
 ) -> None:
@@ -76,7 +82,7 @@ def send_syslog(
 
 
 def emit_alerts(
-    anomalies: list[AnomalyFlag],
+    anomalies: list[Alert],
     *,
     jsonl_path: str | Path | None = None,
     webhook: str | None = None,
@@ -84,7 +90,8 @@ def emit_alerts(
 ) -> list[str]:
     """Dispatch flags to the configured sinks; returns human-readable results.
 
-    Network sinks fail soft so a down collector never aborts the run.
+    Accepts anomaly flags and/or ARP-spoofing alerts (same shape). Network sinks
+    fail soft so a down collector never aborts the run.
     """
     results: list[str] = []
     if not anomalies:

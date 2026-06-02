@@ -11,11 +11,14 @@ from __future__ import annotations
 import time
 
 from rich.console import Console, Group, RenderableType
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from .analyzer import AnomalyFlag
+from .defense import DefenseAlert
+from .discovery import DiscoveryReport
 from .scanner import PortState, ScanReport
 from .sniffer import PacketSummary, TrafficStats
 
@@ -29,13 +32,17 @@ _STATE_STYLE = {
     PortState.CLOSED: "red",
 }
 
-# Colour per protocol for live capture lines.
+# Colour per protocol for live capture lines (mirrors the web palette).
 _PROTO_STYLE = {
     "TCP": "cyan",
     "UDP": "blue",
     "ICMP": "magenta",
+    "ICMPv6": "magenta",
     "ARP": "yellow",
     "DNS": "green",
+    "IP": "white",
+    "IPv6": "white",
+    "OTHER": "white",
 }
 
 
@@ -76,8 +83,8 @@ def render_scan_table(report: ScanReport, *, show_closed: bool = False) -> Table
             str(r.port),
             r.proto.value,
             f"[{style}]{r.state.value}[/{style}]" if style else r.state.value,
-            r.service_hint or "",
-            r.banner or "",
+            escape(r.service_hint or ""),
+            escape(r.banner or ""),  # banner is remote-controlled — escape markup
         )
 
     if hidden:
@@ -102,9 +109,11 @@ def print_packet(summary: PacketSummary) -> None:
     """Print one live capture line, coloured by protocol."""
     clock = time.strftime("%H:%M:%S", time.localtime(summary.ts))
     style = _PROTO_STYLE.get(summary.proto, "white")
+    # escape() the info string: it contains literal brackets (e.g. TCP "[S]"
+    # flags) that rich would otherwise swallow as markup tags.
     console.print(
         f"[dim]{clock}[/dim] [{style}]{summary.proto:<5}[/{style}] "
-        f"{summary.length:>5}B  {summary.info}"
+        f"{summary.length:>5}B  {escape(summary.info)}"
     )
 
 
@@ -116,7 +125,7 @@ def render_traffic_table(stats: TrafficStats, top: int = 10) -> Table:
     )
     title = f"Traffic — {stats.packets} pkts / {stats.bytes} bytes"
     if protos:
-        title += f"  [{protos}]"
+        title += "  " + escape(f"[{protos}]")  # bracketed text, not rich markup
     table = Table(title=title, header_style="bold cyan", expand=False)
     table.add_column("Source IP")
     table.add_column("Packets", justify="right")
@@ -136,8 +145,45 @@ def render_cve_table(cve_by_port: dict[int, list]) -> Table:
     table.add_column("Summary", overflow="fold")
     for port in sorted(cve_by_port):
         for entry in cve_by_port[port]:
-            table.add_row(str(port), entry.id, entry.cvss or "—", entry.summary)
+            table.add_row(str(port), escape(entry.id), entry.cvss or "—",
+                          escape(entry.summary))  # NVD text — escape markup
     return table
+
+
+def render_discovery_table(report: DiscoveryReport) -> Table:
+    """Build a rich Table of discovered hosts (returned for testing)."""
+    title = (f"Host discovery — {report.count} up on {report.network} "
+             f"({report.method})")
+    table = Table(title=title, header_style="bold cyan", expand=False)
+    table.add_column("IP")
+    table.add_column("MAC")
+    table.add_column("Vendor (best guess)")
+    table.add_column("Via")
+    table.add_column("Open ports")
+    for h in report.hosts:
+        ports = ", ".join(str(p) for p in h.open_ports) if h.open_ports else "—"
+        table.add_row(h.ip, h.mac or "—", h.vendor or "—", h.method, ports)
+    return table
+
+
+# Defense-alert severity colours, deepest red for the critical gateway case.
+_SEVERITY_STYLE = {"info": "cyan", "warning": "yellow", "critical": "bold red"}
+
+
+def render_defense(alerts: list[DefenseAlert]) -> Panel:
+    """Panel listing ARP-spoofing / MITM alerts (or an all-clear)."""
+    if not alerts:
+        body: RenderableType = "[green]no spoofing signs detected[/green]"
+    else:
+        lines = []
+        for a in alerts:
+            style = _SEVERITY_STYLE.get(a.severity, "yellow")
+            lines.append(
+                f"[{style}]{escape(f'[{a.kind}]')}[/{style}] {escape(a.detail)}"
+            )
+        body = "\n".join(lines)
+    return Panel(body, title="ARP-spoofing / MITM alerts (heuristic)",
+                 border_style="red")
 
 
 def render_anomalies(anomalies: list[AnomalyFlag]) -> Panel:
@@ -145,7 +191,10 @@ def render_anomalies(anomalies: list[AnomalyFlag]) -> Panel:
     if not anomalies:
         body: RenderableType = "[green]no anomalies flagged[/green]"
     else:
-        lines = [f"[bold red][{a.kind}][/bold red] {a.detail}" for a in anomalies]
+        lines = [
+            f"[bold red]{escape(f'[{a.kind}]')}[/bold red] {escape(a.detail)}"
+            for a in anomalies
+        ]
         body = "\n".join(lines)
     return Panel(body, title="Anomaly flags (heuristic)", border_style="red")
 
@@ -155,7 +204,9 @@ def render_recent_packets(recent: list[PacketSummary]) -> Panel:
     lines = []
     for s in recent:
         style = _PROTO_STYLE.get(s.proto, "white")
-        lines.append(f"[{style}]{s.proto:<5}[/{style}] {s.length:>5}B  {s.info}")
+        lines.append(
+            f"[{style}]{s.proto:<5}[/{style}] {s.length:>5}B  {escape(s.info)}"
+        )
     body: RenderableType = "\n".join(lines) if lines else "[dim]waiting…[/dim]"
     return Panel(body, title="Recent packets", border_style="blue")
 
@@ -166,12 +217,16 @@ def render_dashboard(
     anomalies: list[AnomalyFlag],
     recent: list[PacketSummary],
     *,
+    defense: list[DefenseAlert] | None = None,
     show_closed: bool = False,
 ) -> RenderableType:
     """Compose the integrated dashboard renderable (scan + live traffic)."""
-    return Group(
+    sections: list[RenderableType] = [
         render_scan_table(scan_report, show_closed=show_closed),
         render_traffic_table(stats),
         render_recent_packets(recent),
-        render_anomalies(anomalies),
-    )
+    ]
+    if defense is not None:
+        sections.append(render_defense(defense))
+    sections.append(render_anomalies(anomalies))
+    return Group(*sections)

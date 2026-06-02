@@ -7,6 +7,7 @@ import json
 from netsleuth import alerts
 from netsleuth.alerts import emit_alerts, to_jsonl, write_jsonl
 from netsleuth.analyzer import AnomalyFlag
+from netsleuth.defense import DefenseAlert
 
 _FLAGS = [
     AnomalyFlag("port-scan", "warning", "10.0.0.5 touched 20 ports"),
@@ -33,6 +34,23 @@ def test_emit_alerts_noop_when_empty(tmp_path):
     path = tmp_path / "alerts.jsonl"
     assert emit_alerts([], jsonl_path=path) == []
     assert not path.exists()
+
+
+def test_defense_alerts_forward_through_pipeline(tmp_path):
+    # A critical ARP-spoofing alert must serialise and forward like any flag.
+    crit = DefenseAlert("arp-mac-change", "critical", "gateway MAC changed")
+    path = tmp_path / "alerts.jsonl"
+    write_jsonl(path, [crit])
+    line = json.loads(path.read_text().splitlines()[0])
+    assert line["kind"] == "arp-mac-change" and line["severity"] == "critical"
+
+
+def test_emit_mixed_anomaly_and_defense(tmp_path):
+    mixed = [*_FLAGS, DefenseAlert("duplicate-ip", "warning", "two MACs")]
+    path = tmp_path / "alerts.jsonl"
+    results = emit_alerts(mixed, jsonl_path=path)
+    assert any("3 alert" in r for r in results)
+    assert len(path.read_text().splitlines()) == 3
 
 
 def test_emit_alerts_webhook_failsoft(monkeypatch):

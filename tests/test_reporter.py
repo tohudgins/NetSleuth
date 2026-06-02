@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 
 from netsleuth.analyzer import AnomalyFlag
+from netsleuth.defense import DefenseAlert
+from netsleuth.discovery import DiscoveryReport, Host
 from netsleuth.reporter import build_report, to_html, to_json, write_report
 from netsleuth.scanner import PortResult, PortState, Protocol, ScanReport
 from netsleuth.sniffer import PacketSummary, TrafficStats
@@ -71,6 +73,44 @@ def test_empty_anomalies_shows_none_detected():
     html = to_html(build_report(scan=_scan_report(), stats=_stats(), anomalies=[]))
     assert "Anomaly flags" in html
     assert "none detected" in html.lower()
+
+
+def _discovery() -> DiscoveryReport:
+    return DiscoveryReport(
+        network="192.168.1.0/24", method="arp-sweep",
+        hosts=[Host(ip="192.168.1.1", mac="08:00:27:ab:cd:ef",
+                    vendor="VirtualBox", method="arp", open_ports=[80])],
+    )
+
+
+def test_build_report_discovery_section():
+    rep = build_report(discovery=_discovery())
+    assert rep["discovery"]["count"] == 1
+    assert rep["discovery"]["hosts"][0]["vendor"] == "VirtualBox"
+
+
+def test_build_report_defense_section():
+    rep = build_report(defense=[DefenseAlert("duplicate-ip", "critical", "demo")])
+    assert rep["defense"][0]["severity"] == "critical"
+
+
+def test_html_renders_discovery_and_defense():
+    rep = build_report(
+        discovery=_discovery(),
+        defense=[DefenseAlert("arp-mac-change", "critical", "gateway MAC changed")],
+    )
+    html = to_html(rep)
+    assert "192.168.1.1" in html
+    assert "VirtualBox" in html
+    assert "MITM alerts" in html
+    assert "gateway MAC changed" in html
+    assert "anom critical" in html  # severity-styled class
+
+
+def test_html_omits_discovery_when_absent():
+    html = to_html(build_report(scan=_scan_report()))
+    assert "Host discovery" not in html
+    assert "MITM alerts" not in html
 
 
 def test_open_filtered_state_css_class():

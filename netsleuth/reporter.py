@@ -19,6 +19,8 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .analyzer import AnomalyFlag
+from .defense import DefenseAlert
+from .discovery import DiscoveryReport
 from .scanner import ScanReport
 from .sniffer import TrafficStats
 
@@ -30,11 +32,14 @@ def build_report(
     stats: TrafficStats | None = None,
     anomalies: list[AnomalyFlag] | None = None,
     cves: dict[int, list[dict[str, Any]]] | None = None,
+    discovery: DiscoveryReport | None = None,
+    defense: list[DefenseAlert] | None = None,
 ) -> dict[str, Any]:
     """Assemble the unified, JSON-serialisable report structure.
 
     ``cves`` maps a port to a list of already-serialised CVE dicts (id/summary/
-    cvss); they are attached to the matching port entry.
+    cvss); they are attached to the matching port entry. ``discovery`` adds a
+    host inventory; ``defense`` adds ARP-spoofing alerts.
     """
     report: dict[str, Any] = {
         "tool": "NetSleuth",
@@ -79,6 +84,29 @@ def build_report(
         report["anomalies"] = [
             {"kind": a.kind, "severity": a.severity, "detail": a.detail}
             for a in anomalies
+        ]
+
+    if discovery is not None:
+        report["discovery"] = {
+            "network": discovery.network,
+            "method": discovery.method,
+            "count": discovery.count,
+            "hosts": [
+                {
+                    "ip": h.ip,
+                    "mac": h.mac,
+                    "vendor": h.vendor,
+                    "method": h.method,
+                    "open_ports": h.open_ports,
+                }
+                for h in discovery.hosts
+            ],
+        }
+
+    if defense is not None:
+        report["defense"] = [
+            {"kind": a.kind, "severity": a.severity, "detail": a.detail}
+            for a in defense
         ]
 
     return report

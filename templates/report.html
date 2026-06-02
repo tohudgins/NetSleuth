@@ -49,6 +49,10 @@
     .anom { border-left:4px solid var(--warn); background:#fef2f2; padding:8px 12px;
             border-radius:4px; margin-bottom:8px; font-size:.9rem; }
     .anom .kind { font-weight:700; color:var(--warn); }
+    .anom.info { border-left-color:var(--accent); background:#eff6ff; }
+    .anom.info .kind { color:var(--accent); }
+    .anom.critical { border-left-color:#7f1d1d; background:#fee2e2; }
+    .anom.critical .kind { color:#7f1d1d; }
     .muted { color:var(--muted); } .small { font-size:.8rem; }
   </style>
 </head>
@@ -66,6 +70,8 @@
       {% if scan %}<div class="stat"><div class="n">{{ scan.open_ports | length }}</div><div class="l">open ports</div></div>{% endif %}
       {% if traffic %}<div class="stat"><div class="n">{{ traffic.packets }}</div><div class="l">packets</div></div>{% endif %}
       {% if anomalies is defined %}<div class="stat"><div class="n">{{ anomalies | length }}</div><div class="l">anomalies</div></div>{% endif %}
+      {% if discovery %}<div class="stat"><div class="n">{{ discovery.count }}</div><div class="l">hosts up</div></div>{% endif %}
+      {% if defense is defined %}<div class="stat"><div class="n">{{ defense | length }}</div><div class="l">spoof alerts</div></div>{% endif %}
     </div>
 
     {% if scan %}
@@ -123,12 +129,47 @@
     </div>
     {% endif %}
 
+    {% if discovery %}
+    <div class="card">
+      <h2>Host discovery — {{ discovery.count }} up on {{ discovery.network }} ({{ discovery.method }})</h2>
+      <table>
+        <thead><tr><th>IP</th><th>MAC</th><th>Vendor (best guess)</th><th>Via</th><th>Open ports</th></tr></thead>
+        <tbody>
+          {% for h in discovery.hosts %}
+          <tr>
+            <td class="mono">{{ h.ip }}</td>
+            <td class="mono">{{ h.mac or "—" }}</td>
+            <td>{{ h.vendor or "—" }}</td>
+            <td>{{ h.method }}</td>
+            <td class="mono">{{ h.open_ports | join(", ") if h.open_ports else "—" }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="5" class="muted">no hosts responded</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {% if defense is defined %}
+    <div class="card">
+      <h2>ARP-spoofing / MITM alerts (heuristic)</h2>
+      {% if defense %}
+        {% for a in defense %}
+        <div class="anom {{ a.severity }}"><span class="kind">[{{ a.kind }}]</span> {{ a.detail }}</div>
+        {% endfor %}
+      {% else %}
+        <span class="badge ok">no spoofing signs detected</span>
+      {% endif %}
+    </div>
+    {% endif %}
+
     {% if anomalies is defined %}
     <div class="card">
       <h2>Anomaly flags (heuristic)</h2>
       {% if anomalies %}
         {% for a in anomalies %}
-        <div class="anom"><span class="kind">[{{ a.kind }}]</span> {{ a.detail }}</div>
+        <div class="anom {{ a.severity }}"><span class="kind">[{{ a.kind }}]</span> {{ a.detail }}</div>
         {% endfor %}
       {% else %}
         <span class="badge ok">none detected</span>
