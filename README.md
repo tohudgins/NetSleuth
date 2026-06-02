@@ -17,7 +17,8 @@ implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
 
 - [Highlights](#highlights)
 - [Install](#install)
-- [Usage](#usage)
+- [Web dashboard](#web-dashboard)
+- [Usage (CLI)](#usage-cli)
 - [Analyzing real-world captures (blue-team)](#analyzing-real-world-captures-blue-team)
 - [Alert forwarding + CVE lookup](#alert-forwarding--cve-lookup)
 - [Architecture](#architecture)
@@ -30,6 +31,8 @@ implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
 
 ## Highlights
 
+- **Web dashboard** — a browser UI to run scans, analyze uploaded captures, and
+  watch live capture stream in real time, with styled tables, charts, and reports.
 - **Port scanner** — TCP connect scan (unprivileged), half-open SYN scan
   (privileged, scapy), and UDP scan; banner grabbing incl. TLS for HTTPS; an OS
   *family heuristic* (a coarse TTL best guess — **not** real fingerprinting).
@@ -60,7 +63,26 @@ Requires Python 3.10+. Live SYN scan and packet capture need root (Linux/macOS)
 or Administrator (Windows); everything else, including PCAP analysis, runs
 unprivileged.
 
-## Usage
+## Web dashboard
+
+The easiest way to use NetSleuth — a browser UI for scans, capture analysis, and
+live capture:
+
+```bash
+netsleuth-web                 # → http://127.0.0.1:8765  (scans + pcap analysis)
+sudo netsleuth-web            # also enables the Live capture tab (needs root)
+```
+
+It binds to `127.0.0.1` only (this server runs scans/captures — never expose it
+on a network). The dashboard has three tabs: **Scan**, **Analyze capture** (drag
+in a `.pcap`), and **Live capture** (start/stop, packets stream in live). It's a
+thin layer over the same engine as the CLI — built on Flask with synchronous
+Server-Sent Events, so the "threads, not asyncio" model holds.
+
+> Run the server with `sudo` only for live capture. If launched unprivileged, the
+> Live tab reports that capture needs root instead of failing.
+
+## Usage (CLI)
 
 ```bash
 # scan localhost (works unprivileged via connect scan)
@@ -129,32 +151,32 @@ they are not a confirmed-vulnerable verdict.
 ## Architecture
 
 ```
-                 ┌─────────────┐
-   CLI (main.py) │ argparse +  │  picks a mode, wires modules, owns no logic
-                 │ run_* funcs │
-                 └──────┬──────┘
-        ┌───────────────┼───────────────┬───────────────┐
-        ▼               ▼               ▼               ▼
-   scanner.py       sniffer.py       pcap.py         cve.py
-   (socket+scapy)   (scapy sniff     (offline read   (NVD lookup,
-                     in a thread)     of captures)    injectable fetch)
-        │               │               │
-        └──────► PacketSummary / ScanReport ◄─────────┐
-                        │                              │
-                        ▼                              │
-                   analyzer.py  ──► AnomalyFlag ───────┤
-                        │                              │
-              ┌─────────┼───────────┬──────────────┐  │
-              ▼         ▼           ▼              ▼  ▼
-          ui.py     reporter.py   alerts.py    (privileges.py gates raw I/O)
+        ┌──────────────────────┬──────────────────────┐
+   cli.py (argparse, rich)      web.py (Flask + SSE, browser UI)
+        └───────────┬──────────┴───────────┬──────────┘
+        ┌───────────┼───────────┬──────────┼──────────┐
+        ▼           ▼           ▼          ▼          ▼
+   scanner.py   sniffer.py   pcap.py     cve.py   (privileges.py
+   (socket+     (scapy sniff (offline    (NVD       gates raw I/O)
+    scapy)       in a thread) captures)   lookup)
+        │           │           │
+        └────► PacketSummary / ScanReport ◄────┐
+                        │                       │
+                        ▼                       │
+                   analyzer.py ──► AnomalyFlag ─┤
+                        │                       │
+              ┌─────────┼───────────┬───────────┤
+              ▼         ▼           ▼           ▼
+          ui.py     reporter.py   alerts.py
         (rich)    (JSON + HTML)  (jsonl/webhook/syslog)
 ```
 
-Dependencies point **inward**: presentation (`ui`), serialization (`reporter`),
-and forwarding (`alerts`) depend on the core data types — `ScanReport`,
-`PacketSummary`, `AnomalyFlag` — never the reverse. `main.py` is the only place
-that knows about all modules; every other module is independently importable and
-unit-tested.
+Dependencies point **inward**: presentation (`ui`, `web`), serialization
+(`reporter`), and forwarding (`alerts`) depend on the core data types —
+`ScanReport`, `PacketSummary`, `AnomalyFlag` — never the reverse. Both front
+ends (`cli.py`, `web.py`) wire the same modules; every other module is
+independently importable and unit-tested. The web layer is thin: each endpoint
+returns `reporter.build_report(...)` as JSON for the browser to render.
 
 Because **live capture and PCAP import both produce `PacketSummary`**, the
 analyzer, traffic stats, reporter, and alert pipeline are identical for live and
@@ -182,7 +204,13 @@ across ports with a single `ThreadPoolExecutor`; the sniffer runs scapy's
 blocking `sniff()` in one dedicated thread governed by a `threading.Event`. We
 avoid mixing asyncio with threads and blocking scapy. The live dashboard reads
 the capture buffer via atomic `list()` snapshots rather than iterating a list
-the capture thread is mutating.
+the capture thread is mutating. **The web UI uses Flask (synchronous, threaded)
+with Server-Sent Events — deliberately not async FastAPI — so this one model
+holds across the whole stack.**
+
+**The server never exposes itself.** `netsleuth-web` binds to `127.0.0.1` only
+and refuses non-loopback hosts: a tool that runs scans and captures must not be
+reachable over the network.
 
 **Graceful privilege degradation.** `privileges.py` detects root/Admin once;
 unprivileged, the scanner falls back to a connect scan and the sniffer prints a
@@ -251,6 +279,7 @@ ruff check . && mypy netsleuth main.py && pytest -q
 - [x] Phase 2 — Sniffer (threaded scapy capture, TCP/UDP/ICMP/ARP/DNS decode, per-IP stats)
 - [x] Phase 3 — Integration (--scan-then-sniff), analyzer anomaly flags, live dashboard, JSON/HTML reports
 - [x] Phase 4 — PCAP import, attack-sample lab, alert forwarding (JSON-lines/webhook/syslog), CVE lookup
+- [x] Phase 5 — Web dashboard (Flask + SSE): scan, pcap analysis, live capture in the browser
 
 ## Limitations & future work
 
@@ -260,5 +289,4 @@ ruff check . && mypy netsleuth main.py && pytest -q
   would catch slow scans and cut false positives.
 - CVE matching is keyword-based against NVD; CPE-accurate matching would be more
   precise.
-- Nice-to-have: a recorded `docs/demo.gif` of a sample capture being flagged.
-```
+- Nice-to-have: a recorded `docs/demo.gif` of the dashboard catching an attack.
