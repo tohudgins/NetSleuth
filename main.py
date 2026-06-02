@@ -63,6 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--workers", type=int, default=100, help="thread pool size")
     p.add_argument("--connect", action="store_true",
                    help="force unprivileged connect scan even if privileged")
+    p.add_argument("--show-closed", action="store_true",
+                   help="list closed/filtered ports too (default: only open)")
 
     sniff_grp = p.add_argument_group("sniffer (needs root/Administrator)")
     sniff_grp.add_argument("--sniff", action="store_true",
@@ -177,7 +179,7 @@ def run_scan(args: argparse.Namespace) -> int:
             f"OS family (heuristic, best guess): {report.os_family_guess}",
             style="magenta",
         )
-    ui.console.print(ui.render_scan_table(report))
+    ui.console.print(ui.render_scan_table(report, show_closed=args.show_closed))
     if not report.open_ports:
         ui.console.print("  no open ports found", style="dim")
 
@@ -241,7 +243,7 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
     # Always TCP for the scan stage so we have ports to focus the capture on.
     report = _scan(args, Protocol.TCP, show_progress=True)
     open_ports = report.open_ports
-    ui.console.print(ui.render_scan_table(report))
+    ui.console.print(ui.render_scan_table(report, show_closed=args.show_closed))
     cves = _cve_enrich(args, report)
 
     if not open_ports:
@@ -275,7 +277,8 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
         nonlocal anomalies
         snapshot = list(sniffer.packets)  # atomic copy of the capture buffer
         anomalies = analyze(snapshot)
-        return ui.render_dashboard(report, sniffer.stats, anomalies, snapshot[-12:])
+        return ui.render_dashboard(report, sniffer.stats, anomalies, snapshot[-12:],
+                                   show_closed=args.show_closed)
 
     sniffer.start()
     deadline = time.monotonic() + args.duration

@@ -47,8 +47,17 @@ def print_privilege_notice(notice: str) -> None:
         console.print(notice, style="bold yellow")
 
 
-def render_scan_table(report: ScanReport) -> Table:
-    """Build a rich Table of the scan results (returned so it's unit-testable)."""
+# Port states worth listing row-by-row; everything else is summarised.
+_SHOWN_STATES = {PortState.OPEN, PortState.OPEN_FILTERED}
+
+
+def render_scan_table(report: ScanReport, *, show_closed: bool = False) -> Table:
+    """Build a rich Table of the scan results (returned so it's unit-testable).
+
+    By default only open / open|filtered ports get a row; the rest are collapsed
+    into a one-line caption (like nmap's "Not shown: N closed ports"). Pass
+    show_closed=True to list every port.
+    """
     title = f"{report.scan_type} scan of {report.target}"
     table = Table(title=title, header_style="bold cyan", expand=False)
     table.add_column("Port", justify="right")
@@ -57,7 +66,11 @@ def render_scan_table(report: ScanReport) -> Table:
     table.add_column("Service")
     table.add_column("Banner", overflow="fold")
 
+    hidden: dict[str, int] = {}
     for r in report.ports:
+        if not show_closed and r.state not in _SHOWN_STATES:
+            hidden[r.state.value] = hidden.get(r.state.value, 0) + 1
+            continue
         style = _STATE_STYLE.get(r.state, "")
         table.add_row(
             str(r.port),
@@ -66,6 +79,10 @@ def render_scan_table(report: ScanReport) -> Table:
             r.service_hint or "",
             r.banner or "",
         )
+
+    if hidden:
+        summary = ", ".join(f"{n} {state}" for state, n in sorted(hidden.items()))
+        table.caption = f"Not shown: {summary}  (use --show-closed to list)"
     return table
 
 
@@ -148,10 +165,12 @@ def render_dashboard(
     stats: TrafficStats,
     anomalies: list[AnomalyFlag],
     recent: list[PacketSummary],
+    *,
+    show_closed: bool = False,
 ) -> RenderableType:
     """Compose the integrated dashboard renderable (scan + live traffic)."""
     return Group(
-        render_scan_table(scan_report),
+        render_scan_table(scan_report, show_closed=show_closed),
         render_traffic_table(stats),
         render_recent_packets(recent),
         render_anomalies(anomalies),

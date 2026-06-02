@@ -24,12 +24,21 @@ def _sample_report() -> ScanReport:
 
 
 def test_render_scan_table_shape():
+    # Sample has 1 open + 1 closed; by default only the open port is listed and
+    # the closed one is summarised in the caption.
     table = render_scan_table(_sample_report())
     assert isinstance(table, Table)
-    assert table.row_count == 2
+    assert table.row_count == 1
     assert [c.header for c in table.columns] == [
         "Port", "Proto", "State", "Service", "Banner",
     ]
+    assert table.caption is not None and "1 closed" in table.caption
+
+
+def test_render_scan_table_show_closed():
+    table = render_scan_table(_sample_report(), show_closed=True)
+    assert table.row_count == 2
+    assert table.caption is None
 
 
 def test_render_dashboard_renders_to_text():
