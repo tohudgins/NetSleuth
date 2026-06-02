@@ -1,0 +1,90 @@
+:root {
+  --bg: #0f172a; --panel: #ffffff; --ink: #1e293b; --muted: #64748b;
+  --line: #e2e8f0; --accent: #2563eb;
+  --open: #15803d; --closed: #b91c1c; --filt: #a16207; --warn: #b91c1c;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: var(--ink); background: #f1f5f9;
+}
+header {
+  background: var(--bg); color: #e2e8f0; padding: 14px 22px;
+  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+}
+.brand { font-size: 1.2rem; }
+.brand .muted { color: #94a3b8; font-size: .85rem; }
+header .notice {
+  margin-left: auto; background: #422006; color: #fde68a;
+  padding: 6px 12px; border-radius: 6px; font-size: .8rem;
+}
+.tabs { display: flex; gap: 4px; padding: 12px 22px 0; background: #f1f5f9; }
+.tab {
+  border: 1px solid var(--line); border-bottom: none; background: #e2e8f0;
+  padding: 9px 18px; border-radius: 8px 8px 0 0; cursor: pointer; font-size: .95rem;
+  color: var(--muted);
+}
+.tab.active { background: var(--panel); color: var(--ink); font-weight: 600; }
+.panel { display: none; padding: 20px 22px; }
+.panel.active { display: block; }
+
+.controls {
+  display: flex; gap: 14px; align-items: end; flex-wrap: wrap;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px; margin-bottom: 18px;
+}
+.controls label { display: flex; flex-direction: column; font-size: .78rem; color: var(--muted); gap: 4px; }
+.controls label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--ink); font-size: .9rem; }
+.controls input[type=text], .controls input:not([type]) , .controls input[name] {
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: .95rem; min-width: 140px;
+}
+.controls input[type=checkbox] { min-width: auto; }
+button {
+  background: var(--accent); color: #fff; border: none; padding: 9px 18px;
+  border-radius: 6px; cursor: pointer; font-size: .95rem;
+}
+button:disabled { background: #94a3b8; cursor: not-allowed; }
+.spinner { color: var(--accent); font-size: .85rem; align-self: center; }
+
+.results { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04);
+}
+.card h3 { margin: 0 0 12px; font-size: .95rem; }
+.card.full { grid-column: 1 / -1; }
+.error { color: var(--warn); font-weight: 600; }
+
+table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; }
+.banner { white-space: pre-wrap; color: var(--muted); font-size: .78rem; }
+
+.state-open { color: var(--open); font-weight: 700; }
+.state-closed { color: var(--closed); }
+.state-filtered, .state-open-filtered { color: var(--filt); }
+
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: .72rem; font-weight: 700; }
+.badge.warn { background: #fee2e2; color: var(--warn); }
+.badge.ok { background: #dcfce7; color: var(--open); }
+
+.bars { display: grid; gap: 6px; }
+.bar-row { display: grid; grid-template-columns: 90px 1fr 64px; align-items: center; gap: 8px; font-size: .82rem; }
+.bar { height: 14px; background: var(--accent); border-radius: 3px; min-width: 2px; }
+.bar.tcp { background: #2563eb; } .bar.udp { background: #0891b2; }
+.bar.dns { background: #16a34a; } .bar.arp { background: #ca8a04; }
+.bar.icmp, .bar.icmpv6 { background: #9333ea; } .bar.other, .bar.ipv6 { background: #94a3b8; }
+
+.anom { border-left: 4px solid var(--warn); background: #fef2f2; padding: 8px 12px; border-radius: 4px; margin-bottom: 8px; font-size: .88rem; }
+.anom .kind { font-weight: 700; color: var(--warn); }
+
+.packets { margin-top: 16px; background: #0b1220; color: #cbd5e1; border-radius: 10px; padding: 12px; font-family: ui-monospace, monospace; font-size: .8rem; max-height: 340px; overflow: auto; }
+.packets .ln { white-space: pre; }
+.packets .p-tcp { color: #60a5fa; } .packets .p-udp { color: #22d3ee; }
+.packets .p-dns { color: #4ade80; } .packets .p-arp { color: #facc15; }
+.packets .p-icmp, .packets .p-icmpv6 { color: #c084fc; }
+
+.muted { color: var(--muted); } .small { font-size: .8rem; }
+footer { padding: 18px 22px; }
