@@ -70,7 +70,7 @@ def test_scan_only_html_omits_anomalies_section():
 def test_empty_anomalies_shows_none_detected():
     html = to_html(build_report(scan=_scan_report(), stats=_stats(), anomalies=[]))
     assert "Anomaly flags" in html
-    assert "None detected" in html
+    assert "none detected" in html.lower()
 
 
 def test_open_filtered_state_css_class():

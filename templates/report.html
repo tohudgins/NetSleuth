@@ -7,94 +7,134 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>NetSleuth Report{% if scan %} — {{ scan.target }}{% endif %}</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
-    h1 { margin-bottom: 0; }
-    .meta { color: #666; font-size: 0.9rem; }
-    .notice { background: #fff8e1; border: 1px solid #ffe082; padding: 0.6rem 0.9rem;
-              border-radius: 6px; margin: 1rem 0; }
-    table { border-collapse: collapse; margin: 0.6rem 0 1.5rem; }
-    th, td { border: 1px solid #ccc; padding: 4px 10px; text-align: left; }
-    th { background: #f3f4f6; }
-    .state-open { color: #15803d; font-weight: 600; }
-    .state-closed { color: #b91c1c; }
-    .state-filtered, .state-open-filtered { color: #a16207; }
-    .warning { color: #b91c1c; font-weight: 600; }
-    code { background: #f3f4f6; padding: 0 4px; white-space: pre-wrap; }
+    :root {
+      --ink:#1e293b; --muted:#64748b; --line:#e2e8f0; --accent:#2563eb;
+      --open:#15803d; --closed:#b91c1c; --filt:#a16207; --warn:#b91c1c;
+    }
+    * { box-sizing:border-box; }
+    body { font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+           margin:0; background:#f1f5f9; color:var(--ink); }
+    header { background:#0f172a; color:#e2e8f0; padding:18px 28px; }
+    header h1 { margin:0; font-size:1.4rem; }
+    header .meta { color:#94a3b8; font-size:.85rem; margin-top:4px; }
+    main { max-width:980px; margin:0 auto; padding:22px 28px 40px; }
+    .notice { background:#fffbeb; border:1px solid #fde68a; color:#7c5e10;
+              padding:10px 14px; border-radius:8px; margin:18px 0; font-size:.88rem; }
+    .summary { display:flex; gap:12px; flex-wrap:wrap; margin:16px 0; }
+    .stat { background:#fff; border:1px solid var(--line); border-radius:10px;
+            padding:12px 18px; min-width:120px; }
+    .stat .n { font-size:1.5rem; font-weight:700; }
+    .stat .l { color:var(--muted); font-size:.78rem; text-transform:uppercase; letter-spacing:.04em; }
+    .card { background:#fff; border:1px solid var(--line); border-radius:10px;
+            padding:18px; margin:16px 0; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+    .card h2 { margin:0 0 12px; font-size:1.05rem; }
+    table { width:100%; border-collapse:collapse; font-size:.9rem; }
+    th,td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); }
+    th { color:var(--muted); font-weight:600; }
+    td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
+    code,.mono { font-family:ui-monospace,Menlo,monospace; font-size:.82rem; }
+    .banner { white-space:pre-wrap; color:var(--muted); font-size:.78rem; display:block; }
+    .state-open { color:var(--open); font-weight:700; }
+    .state-closed { color:var(--closed); }
+    .state-filtered, .state-open-filtered { color:var(--filt); }
+    .bars { display:grid; gap:6px; max-width:520px; }
+    .bar-row { display:grid; grid-template-columns:90px 1fr 60px; align-items:center; gap:8px; font-size:.82rem; }
+    .bar { height:14px; border-radius:3px; min-width:2px; background:var(--accent); }
+    .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:.72rem; font-weight:700; }
+    .badge.warn { background:#fee2e2; color:var(--warn); }
+    .badge.ok { background:#dcfce7; color:var(--open); }
+    .anom { border-left:4px solid var(--warn); background:#fef2f2; padding:8px 12px;
+            border-radius:4px; margin-bottom:8px; font-size:.9rem; }
+    .anom .kind { font-weight:700; color:var(--warn); }
+    .muted { color:var(--muted); } .small { font-size:.8rem; }
   </style>
 </head>
 <body>
-  <h1>NetSleuth Report</h1>
-  <p class="meta">Generated {{ generated_at }}</p>
-  <p class="notice"><strong>Authorized use only.</strong> Generated for a target
-     you own or are permitted to test. OS family is a heuristic best guess, not
-     fingerprinting; anomaly flags are coarse heuristics, not an IDS verdict.</p>
+  <header>
+    <h1>🛰️ NetSleuth Report</h1>
+    <div class="meta">Generated {{ generated_at }}</div>
+  </header>
+  <main>
+    <p class="notice"><strong>Authorized use only.</strong> Generated for a target
+       you own or are permitted to test. OS family is a heuristic best guess, not
+       fingerprinting; anomaly flags are coarse heuristics, not an IDS verdict.</p>
 
-  {% if scan %}
-  <h2>Scan — {{ scan.scan_type }} of {{ scan.target }}</h2>
-  {% if scan.os_family_guess %}
-  <p>OS family (heuristic, best guess): {{ scan.os_family_guess }}</p>
-  {% endif %}
-  <table>
-    <thead><tr><th>Port</th><th>Proto</th><th>State</th><th>Service</th><th>Banner</th></tr></thead>
-    <tbody>
-      {% for p in scan.ports %}
-      <tr>
-        <td>{{ p.port }}</td>
-        <td>{{ p.proto }}</td>
-        <td class="state-{{ p.state | replace('|', '-') }}">{{ p.state }}</td>
-        <td>{{ p.service_hint or "" }}</td>
-        <td>
-          <code>{{ p.banner or "" }}</code>
-          {% if p.cves %}
-          <ul>
-            {% for c in p.cves %}
-            <li><span class="warning">{{ c.id }}</span>{% if c.cvss %} (CVSS {{ c.cvss }}){% endif %}: {{ c.summary }}</li>
-            {% endfor %}
-          </ul>
-          {% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% if scan.ports | selectattr('cves') | list %}
-  <p class="meta">CVEs are keyword-matched candidates from NVD — verify before
-     acting; they are not a confirmed-vulnerable verdict.</p>
-  {% endif %}
-  {% endif %}
+    <div class="summary">
+      {% if scan %}<div class="stat"><div class="n">{{ scan.open_ports | length }}</div><div class="l">open ports</div></div>{% endif %}
+      {% if traffic %}<div class="stat"><div class="n">{{ traffic.packets }}</div><div class="l">packets</div></div>{% endif %}
+      {% if anomalies is defined %}<div class="stat"><div class="n">{{ anomalies | length }}</div><div class="l">anomalies</div></div>{% endif %}
+    </div>
 
-  {% if traffic %}
-  <h2>Traffic — {{ traffic.packets }} packets / {{ traffic.bytes }} bytes</h2>
-  {% if traffic.by_proto %}
-  <p>Protocols:
-    {% for proto, count in traffic.by_proto.items() %}
-    <code>{{ proto }}: {{ count }}</code>{% if not loop.last %} {% endif %}
-    {% endfor %}
-  </p>
-  {% endif %}
-  <table>
-    <thead><tr><th>Source IP</th><th>Packets</th><th>Bytes</th></tr></thead>
-    <tbody>
-      {% for row in traffic.by_ip %}
-      <tr><td>{{ row.ip }}</td><td>{{ row.packets }}</td><td>{{ row.bytes }}</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
+    {% if scan %}
+    {% set openports = scan.ports | selectattr('state', 'in', ['open', 'open|filtered']) | list %}
+    <div class="card">
+      <h2>{{ scan.scan_type }} scan of {{ scan.target }}</h2>
+      {% if scan.os_family_guess %}<p class="small muted">OS family (heuristic): {{ scan.os_family_guess }}</p>{% endif %}
+      <table>
+        <thead><tr><th class="num">Port</th><th>Proto</th><th>State</th><th>Service</th><th>Banner / CVEs</th></tr></thead>
+        <tbody>
+          {% for p in openports %}
+          <tr>
+            <td class="num">{{ p.port }}</td>
+            <td>{{ p.proto }}</td>
+            <td class="state-{{ p.state | replace('|', '-') }}">{{ p.state }}</td>
+            <td>{{ p.service_hint or "" }}</td>
+            <td>
+              <code class="banner">{{ p.banner or "" }}</code>
+              {% for c in p.cves %}
+              <div class="small"><span class="badge warn">{{ c.id }}</span>{% if c.cvss %} CVSS {{ c.cvss }}{% endif %} — {{ c.summary }}</div>
+              {% endfor %}
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="5" class="muted">no open ports</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% set hidden = scan.ports | length - openports | length %}
+      {% if hidden %}<p class="small muted">{{ hidden }} closed/filtered ports not shown.</p>{% endif %}
+    </div>
+    {% endif %}
 
-  {% if anomalies is defined %}
-  <h2>Anomaly flags (heuristic)</h2>
-  {% if anomalies %}
-  <ul>
-    {% for a in anomalies %}
-    <li><span class="{{ a.severity }}">[{{ a.kind }}]</span> {{ a.detail }}</li>
-    {% endfor %}
-  </ul>
-  {% else %}
-  <p>None detected.</p>
-  {% endif %}
-  {% endif %}
+    {% if traffic %}
+    <div class="card">
+      <h2>Traffic — {{ traffic.packets }} packets / {{ traffic.bytes }} bytes</h2>
+      {% if traffic.by_proto %}
+      {% set maxc = traffic.by_proto.values() | max %}
+      <div class="bars">
+        {% for proto, count in traffic.by_proto.items() %}
+        <div class="bar-row"><span>{{ proto }}</span>
+          <span class="bar" style="width:{{ (count / maxc * 100) | round }}%"></span>
+          <span class="num">{{ count }}</span></div>
+        {% endfor %}
+      </div>
+      {% endif %}
+      <table style="margin-top:12px">
+        <thead><tr><th>Source IP</th><th class="num">Packets</th><th class="num">Bytes</th></tr></thead>
+        <tbody>
+          {% for row in traffic.by_ip %}
+          <tr><td class="mono">{{ row.ip }}</td><td class="num">{{ row.packets }}</td><td class="num">{{ row.bytes }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {% if anomalies is defined %}
+    <div class="card">
+      <h2>Anomaly flags (heuristic)</h2>
+      {% if anomalies %}
+        {% for a in anomalies %}
+        <div class="anom"><span class="kind">[{{ a.kind }}]</span> {{ a.detail }}</div>
+        {% endfor %}
+      {% else %}
+        <span class="badge ok">none detected</span>
+      {% endif %}
+    </div>
+    {% endif %}
+  </main>
 </body>
 </html>
