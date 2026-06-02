@@ -24,6 +24,7 @@ implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
 - [Architecture](#architecture)
 - [Design decisions](#design-decisions)
 - [Detection heuristics — and their limits](#detection-heuristics--and-their-limits)
+  - [ARP-spoofing / MITM detector](#arp-spoofing--mitm-detector-defensepy)
 - [Practice legally](#practice-legally)
 - [Testing & quality](#testing--quality)
 - [Project status](#project-status)
@@ -31,8 +32,13 @@ implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
 
 ## Highlights
 
-- **Web dashboard** — a browser UI to run scans, analyze uploaded captures, and
-  watch live capture stream in real time, with styled tables, charts, and reports.
+- **Web dashboard** — a polished dark-theme browser UI to run scans, discover
+  hosts, analyze uploaded captures, and watch live capture stream in real time:
+  SVG protocol donut + traffic-over-time chart, sortable tables, and a
+  click-to-inspect packet hexdump.
+- **Host & network discovery** — map the live hosts on a subnet you own: a
+  privileged ARP sweep (with MAC + best-guess vendor) or an unprivileged
+  TCP-ping sweep fallback.
 - **Port scanner** — TCP connect scan (unprivileged), half-open SYN scan
   (privileged, scapy), and UDP scan; banner grabbing incl. TLS for HTTPS; an OS
   *family heuristic* (a coarse TTL best guess — **not** real fingerprinting).
@@ -40,14 +46,19 @@ implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
   decodes TCP/UDP/ICMP/ARP/DNS; per-IP and per-protocol traffic stats; our own
   hex dump.
 - **Anomaly analyzer** — coarse, clearly-labelled heuristics for port scans,
-  SYN floods, and ARP spoofing.
+  SYN floods, ARP spoofing, ICMP floods, DNS tunneling/exfil, C2 beaconing, and
+  new-host detection.
+- **ARP-spoofing / MITM detector** — the *defensive* side of MITM: watches the
+  captured ARP traffic for poisoning signs (baseline MAC changes, duplicate IPs,
+  one MAC impersonating many hosts, gratuitous-ARP floods). NetSleuth detects
+  MITM; it never performs it.
 - **Integration** — `--scan-then-sniff` scans a target, then focuses capture on
   its open ports behind a live `rich` dashboard.
 - **Reporting** — unified JSON + HTML reports from any mode.
 - **PCAP import** — run the full detection pipeline over saved capture files
   (offline, no privileges) — analyze real-world datasets legally.
-- **Alert forwarding** — emit anomalies as JSON-lines / webhook / syslog for
-  SIEM-style integration.
+- **Alert forwarding** — emit anomaly *and* ARP-spoofing alerts as JSON-lines /
+  webhook / syslog for SIEM-style integration.
 - **CVE lookup** — map detected banners to candidate CVEs via NVD (opt-in).
 - **Graceful degradation** — unprivileged, it falls back to a connect scan and
   skips live capture instead of crashing.
@@ -74,10 +85,20 @@ sudo netsleuth-web            # also enables the Live capture tab (needs root)
 ```
 
 It binds to `127.0.0.1` only (this server runs scans/captures — never expose it
-on a network). The dashboard has three tabs: **Scan**, **Analyze capture** (drag
-in a `.pcap`), and **Live capture** (start/stop, packets stream in live). It's a
-thin layer over the same engine as the CLI — built on Flask with synchronous
-Server-Sent Events, so the "threads, not asyncio" model holds.
+on a network). The dashboard has four tabs:
+
+- **Scan** — port scan a target, with optional CVE lookup.
+- **Discover** — sweep a subnet into a host inventory (IP / MAC / vendor / open
+  ports), sortable by any column.
+- **Live capture** — start/stop a capture; packets stream in live with a
+  protocol donut and a traffic-over-time chart, ARP-spoofing + anomaly alerts,
+  and **click any packet to see its hexdump** in a side panel.
+- **Analyze capture** — drag in a `.pcap` for the same offline analysis.
+
+It's a thin layer over the same engine as the CLI — built on Flask with
+synchronous Server-Sent Events, so the "threads, not asyncio" model holds. The
+charts are hand-drawn SVG (no chart-library / CDN dependency), keeping the tool
+self-contained and offline.
 
 > Run the server with `sudo` only for live capture. If launched unprivileged, the
 > Live tab reports that capture needs root instead of failing.
@@ -87,6 +108,9 @@ Server-Sent Events, so the "threads, not asyncio" model holds.
 ```bash
 # scan localhost (works unprivileged via connect scan)
 python main.py 127.0.0.1 -p 1-1024
+
+# discover live hosts on a subnet (ARP sweep w/ sudo, else TCP-ping)
+sudo python main.py 192.168.1.0/24 --discover
 
 # privileged SYN scan (needs sudo / Administrator)
 sudo python main.py 127.0.0.1 -p 22,80,443
@@ -122,21 +146,28 @@ python lab/generate_samples.py
 
 # detect the attack in a capture — no sudo required
 python main.py --pcap lab/samples/port_scan.pcap
-python main.py --pcap lab/samples/syn_flood.pcap --report-dir reports
+python main.py --pcap lab/samples/beacon.pcap --report-dir reports
+python main.py --pcap lab/samples/dns_tunnel.pcap
 python main.py --pcap path/to/real-world.pcap   # e.g. a malware-traffic capture
+
+# escalate spoofing against your gateway to critical, and flag unknown hosts
+python main.py --pcap lab/samples/arp_spoof.pcap --gateway 10.0.0.1
+python main.py --pcap capture.pcap --known-hosts 10.0.0.10,10.0.0.53
 ```
 
-The analyzer flags port-scan, SYN-flood, and ARP-spoof patterns and writes the
-same JSON/HTML report as the live modes.
+The analyzer flags port-scan, SYN-flood, ARP-spoof, ICMP-flood, DNS-tunnel,
+beacon, and new-host patterns (and the spoofing detector raises its own alerts),
+writing the same JSON/HTML report as the live modes. The lab ships a sample
+capture for each of these.
 
 ### Alert forwarding + CVE lookup
 
-Forward detected anomalies into your alerting pipeline (a honeypot, a SIEM, a
-log shipper — all just sinks for the same JSON), and look up candidate CVEs for
-detected service versions:
+Forward detected anomalies **and ARP-spoofing alerts** into your alerting
+pipeline (a honeypot, a SIEM, a log shipper — all just sinks for the same JSON),
+and look up candidate CVEs for detected service versions:
 
 ```bash
-# forward anomaly flags as JSON-lines / to a webhook / to syslog
+# forward anomaly + spoofing alerts as JSON-lines / to a webhook / to syslog
 python main.py --pcap capture.pcap --alert-jsonl alerts.jsonl
 python main.py --pcap capture.pcap --alert-webhook https://example/hook
 sudo python main.py --scan-then-sniff 127.0.0.1 --alert-syslog localhost:514
@@ -154,20 +185,20 @@ they are not a confirmed-vulnerable verdict.
         ┌──────────────────────┬──────────────────────┐
    cli.py (argparse, rich)      web.py (Flask + SSE, browser UI)
         └───────────┬──────────┴───────────┬──────────┘
-        ┌───────────┼───────────┬──────────┼──────────┐
-        ▼           ▼           ▼          ▼          ▼
-   scanner.py   sniffer.py   pcap.py     cve.py   (privileges.py
-   (socket+     (scapy sniff (offline    (NVD       gates raw I/O)
-    scapy)       in a thread) captures)   lookup)
-        │           │           │
-        └────► PacketSummary / ScanReport ◄────┐
-                        │                       │
-                        ▼                       │
-                   analyzer.py ──► AnomalyFlag ─┤
-                        │                       │
-              ┌─────────┼───────────┬───────────┤
-              ▼         ▼           ▼           ▼
-          ui.py     reporter.py   alerts.py
+        ┌──────────┬────────┼────────┬─────────┬─────────┐
+        ▼          ▼        ▼        ▼         ▼         ▼
+  scanner.py  sniffer.py discovery pcap.py  cve.py  (privileges.py
+  (socket+   (scapy sniff .py (ARP/ (offline (NVD      gates raw I/O)
+   scapy)     in a thread) ping sweep) caps)  lookup)
+        │          │                  │
+        └───► PacketSummary / ScanReport / DiscoveryReport ◄──┐
+                        │                                      │
+                        ├──► analyzer.py ──► AnomalyFlag ──────┤
+                        └──► defense.py  ──► DefenseAlert ─────┤
+                        │                                      │
+              ┌─────────┼───────────┬───────────┐             │
+              ▼         ▼           ▼            ▼             │
+          ui.py     reporter.py   alerts.py ◄─────────────────┘
         (rich)    (JSON + HTML)  (jsonl/webhook/syslog)
 ```
 
@@ -229,26 +260,51 @@ a warning when offline. Alert webhook/syslog are likewise fail-soft.
 
 ## Detection heuristics — and their limits
 
-The analyzer flags three patterns over a batch of decoded packets:
+The analyzer flags these patterns over a batch of decoded packets:
 
 | Flag | Signal | Honest limitation |
 |---|---|---|
 | **port-scan** | one source touches ≥ N distinct TCP ports | a busy client can look similar; threshold-based |
 | **SYN flood** | ≥ N SYN-only segments toward one destination | no rate/time window; volume-based |
 | **ARP spoof** | one IP advertised with > 1 MAC | legitimate failover can also trigger it |
+| **ICMP flood** | ≥ N ICMP/ICMPv6 packets toward one destination | also fires on a benign ping sweep |
+| **DNS tunnel** | one source: many queries *and* long avg query names | high-volume legit DNS with long names can trip it |
+| **beacon** | regular-interval connections to one dst:port (low jitter) | needs enough events; cron-like legit traffic looks similar |
+| **new-host** | a source absent from a supplied known-host baseline | only as good as the baseline you pass |
 
 These are coarse heuristics — *triage signals*, not an IDS verdict — and are
 labelled as such in every flag. Thresholds live in `AnalysisConfig` so they can
-be tuned per environment.
+be tuned per environment. `analyze(..., known_hosts=...)` enables the new-host
+check against a baseline (e.g. from a trusted discovery sweep).
+
+### ARP-spoofing / MITM detector (`defense.py`)
+
+A focused, gateway-aware detector for man-in-the-middle activity on your wire —
+the defensive counterpart to an ARP-poisoning attack. It reads the same captured
+ARP traffic and emits severity-rated alerts:
+
+| Alert | Signal | Severity |
+|---|---|---|
+| **arp-mac-change** | an IP's MAC differs from a trusted baseline | warning, or **critical** for a configured gateway IP |
+| **duplicate-ip** | one IP currently claimed by multiple MACs | warning |
+| **mac-many-ips** | one MAC answering for many IPs (subnet-wide poisoning) | warning |
+| **gratuitous-arp** | a flood of unsolicited is-at replies | warning |
+
+Pass a `baseline` (IP → known-good MAC, e.g. from a discovery sweep) and a set of
+`critical_ips` (your gateway) to turn on the strongest, escalated check. Without
+a baseline the other three still work off the captured traffic alone. It surfaces
+in the CLI (`--sniff`, `--scan-then-sniff`, `--pcap`) and the web Live/Analyze
+tabs. **NetSleuth detects MITM; it never performs it.**
 
 ## Practice legally
 
 The `lab/` directory gives you legal targets out of the box:
 
 - **Docker containers** — deliberately-open nginx + FTP bound to `127.0.0.1`.
-- **Sample malicious captures** — `python lab/generate_samples.py` writes
-  port-scan / SYN-flood / ARP-spoof / benign `.pcap` files (crafted on disk,
-  never sent on the wire) to feed `--pcap`.
+- **Sample malicious captures** — `python lab/generate_samples.py` writes a
+  `.pcap` for each detection (port-scan, SYN-flood, ARP-spoof, ICMP-flood,
+  DNS-tunnel, beacon) plus a benign baseline — crafted on disk, never sent on
+  the wire — to feed `--pcap`.
 - **Real-world datasets** — pointers to Wireshark sample captures,
   malware-traffic-analysis.net, and CTF/CICIDS pcaps.
 
@@ -280,11 +336,19 @@ ruff check . && mypy netsleuth main.py && pytest -q
 - [x] Phase 3 — Integration (--scan-then-sniff), analyzer anomaly flags, live dashboard, JSON/HTML reports
 - [x] Phase 4 — PCAP import, attack-sample lab, alert forwarding (JSON-lines/webhook/syslog), CVE lookup
 - [x] Phase 5 — Web dashboard (Flask + SSE): scan, pcap analysis, live capture in the browser
+- [x] Phase 6 — Host & network discovery, ARP-spoofing/MITM detector, deeper anomaly
+      heuristics (ICMP flood, DNS tunneling, beaconing, new-host), and a polished
+      dark dashboard with SVG charts, sortable tables, and packet hexdump drill-down
 
 ## Limitations & future work
 
 - Capture only sees what reaches the host's interface; on a switched LAN that's
-  your own traffic + broadcast/ARP. NetSleuth does no MITM — by design.
+  your own traffic + broadcast/ARP. NetSleuth **detects** MITM (the spoofing
+  detector) but never **performs** it — by design.
+- Discovery is local-scope: the ARP sweep only reaches your own broadcast
+  domain, and the unprivileged TCP-ping fallback can miss hosts that drop all
+  probes. The OUI vendor table is a small, partial best-guess map, not the full
+  IEEE registry.
 - Anomaly heuristics are stateless over a batch; a streaming/windowed analyzer
   would catch slow scans and cut false positives.
 - CVE matching is keyword-based against NVD; CPE-accurate matching would be more

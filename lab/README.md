@@ -31,8 +31,11 @@ on the wire**:
 python lab/generate_samples.py        # writes lab/samples/*.pcap
 python main.py --pcap lab/samples/port_scan.pcap
 python main.py --pcap lab/samples/syn_flood.pcap
-python main.py --pcap lab/samples/arp_spoof.pcap
-python main.py --pcap lab/samples/benign.pcap     # should flag nothing
+python main.py --pcap lab/samples/arp_spoof.pcap   # try --gateway 10.0.0.1
+python main.py --pcap lab/samples/icmp_flood.pcap
+python main.py --pcap lab/samples/dns_tunnel.pcap
+python main.py --pcap lab/samples/beacon.pcap
+python main.py --pcap lab/samples/benign.pcap      # should flag nothing
 ```
 
 ### Real-world captures (legal sources)
