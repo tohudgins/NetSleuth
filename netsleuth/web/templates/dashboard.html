@@ -14,8 +14,9 @@
 
   <nav class="tabs">
     <button class="tab active" data-tab="scan">Scan</button>
-    <button class="tab" data-tab="pcap">Analyze capture</button>
+    <button class="tab" data-tab="discover">Discover</button>
     <button class="tab" data-tab="live">Live capture</button>
+    <button class="tab" data-tab="pcap">Analyze capture</button>
   </nav>
 
   <!-- SCAN -->
@@ -32,15 +33,16 @@
     <div id="scan-results" class="results"></div>
   </section>
 
-  <!-- PCAP -->
-  <section id="tab-pcap" class="panel">
-    <form id="pcap-form" class="controls">
-      <label>Capture file <input type="file" name="file" accept=".pcap,.pcapng,.cap"></label>
-      <button type="submit">Analyze</button>
-      <span class="spinner" id="pcap-spin" hidden>analyzing…</span>
+  <!-- DISCOVER -->
+  <section id="tab-discover" class="panel">
+    <form id="discover-form" class="controls">
+      <label>Network <input name="network" value="127.0.0.1" placeholder="e.g. 192.168.1.0/24"></label>
+      <label>Interface <input name="iface" placeholder="en0 (blank = default)"></label>
+      <button type="submit">Discover hosts</button>
+      <span class="spinner" id="discover-spin" hidden>sweeping…</span>
     </form>
-    <p class="muted small">Tip: generate samples with <code>python lab/generate_samples.py</code>, or use a public capture.</p>
-    <div id="pcap-results" class="results"></div>
+    <p class="muted small">ARP sweep when run with sudo (gets MAC + vendor); otherwise an unprivileged TCP-ping sweep. Map a subnet you own.</p>
+    <div id="discover-results" class="results"></div>
   </section>
 
   <!-- LIVE -->
@@ -53,10 +55,27 @@
       <span class="spinner" id="live-status"></span>
     </form>
     <div id="live-results" class="results"></div>
-    <div id="live-packets" class="packets"></div>
+    <div class="live-grid">
+      <div id="live-packets" class="packets"></div>
+      <div id="packet-detail" class="detail" hidden>
+        <div class="detail-head"><span>Packet detail</span><button type="button" id="detail-close" class="ghost">✕</button></div>
+        <pre id="detail-hex" class="hex"></pre>
+      </div>
+    </div>
   </section>
 
-  <footer class="muted small">NetSleuth · localhost only · live capture needs sudo</footer>
+  <!-- PCAP -->
+  <section id="tab-pcap" class="panel">
+    <form id="pcap-form" class="controls">
+      <label>Capture file <input type="file" name="file" accept=".pcap,.pcapng,.cap"></label>
+      <button type="submit">Analyze</button>
+      <span class="spinner" id="pcap-spin" hidden>analyzing…</span>
+    </form>
+    <p class="muted small">Tip: generate samples with <code>python lab/generate_samples.py</code>, or use a public capture.</p>
+    <div id="pcap-results" class="results"></div>
+  </section>
+
+  <footer class="muted small">NetSleuth · localhost only · live capture &amp; ARP sweep need sudo · heuristics, not an IDS</footer>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

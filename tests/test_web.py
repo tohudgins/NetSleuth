@@ -58,11 +58,12 @@ def test_capture_start_requires_privilege(client, monkeypatch):
 
 
 class _FakeSniffer:
-    def __init__(self, *, iface=None, bpf_filter=None):
+    def __init__(self, *, iface=None, bpf_filter=None, on_packet=None):
         self.packets: list = []
         self.stats = TrafficStats()
         self.error = None
         self.running = False
+        self.on_packet = on_packet
 
     def start(self):
         self.running = True
@@ -79,4 +80,28 @@ def test_capture_start_stop_roundtrip(client, monkeypatch):
     assert client.post("/api/capture/start", json={"iface": "lo0"}).status_code == 200
     stop = client.post("/api/capture/stop")
     assert stop.status_code == 200
-    assert "traffic" in stop.get_json()
+    body = stop.get_json()
+    assert "traffic" in body
+    assert "defense" in body  # spoofing alerts attached to live-capture report
+
+
+def test_api_discover_force_tcp_localhost(client):
+    resp = client.post("/api/discover", json={"network": "127.0.0.1"})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["discovery"]["network"] == "127.0.0.1"
+    assert "hosts" in body["discovery"]
+
+
+def test_capture_frame_hexdump(client):
+    # Seed the bounded raw-frame store directly, then drill into it.
+    monkey_idx = 7
+    with web._frames_lock:
+        web._raw_frames.clear()
+        web._raw_frames[monkey_idx] = b"GET / HTTP/1.0\r\n\r\n"
+    resp = client.get(f"/api/capture/frame/{monkey_idx}")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["index"] == monkey_idx
+    assert "GET" in body["hex"]  # ASCII column of our own hexdump
+    assert client.get("/api/capture/frame/999999").status_code == 404

@@ -24,15 +24,19 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from collections import OrderedDict
+
 from flask import Flask, Response, jsonify, render_template, request
 
 from .analyzer import analyze
 from .cli import _parse_ports
 from .cve import enrich_scan
+from .defense import detect_spoofing
+from .discovery import discover
 from .pcap import analyze_pcap
 from .reporter import build_report
 from .scanner import Protocol, scan
-from .sniffer import Sniffer, capture_available
+from .sniffer import PacketSummary, Sniffer, capture_available, hexdump
 
 _WEB_DIR = Path(__file__).resolve().parent / "web"
 
@@ -40,13 +44,37 @@ _WEB_DIR = Path(__file__).resolve().parent / "web"
 _capture_lock = threading.Lock()
 _sniffer: Sniffer | None = None
 
+# Bounded store of recent raw frames so the UI can drill into any packet's
+# hexdump on demand without streaming every byte over SSE. Keyed by the packet's
+# absolute index in the capture (which matches its position in snf.packets), so
+# the browser can request /api/capture/frame/<i> for the row it clicked. Capped
+# to keep memory flat on long captures; older frames expire.
+_RAW_CAP = 2000
+_raw_frames: "OrderedDict[int, bytes]" = OrderedDict()
+_raw_next = 0  # next absolute index; matches the packet's position in snf.packets
+_frames_lock = threading.Lock()
 
-def _capture_payload(snf: Sniffer, new: list[Any]) -> dict[str, Any]:
-    anomalies = analyze(list(snf.packets))
+
+def _store_raw(summary: PacketSummary, raw_pkt: Any) -> None:
+    """Capture-thread callback: retain a bounded window of raw frames."""
+    global _raw_next
+    with _frames_lock:
+        _raw_frames[_raw_next] = bytes(raw_pkt)
+        _raw_next += 1
+        while len(_raw_frames) > _RAW_CAP:
+            _raw_frames.popitem(last=False)
+
+
+def _capture_payload(
+    snf: Sniffer, new: list[PacketSummary], start: int
+) -> dict[str, Any]:
+    packets = list(snf.packets)
+    anomalies = analyze(packets)
+    spoofing = detect_spoofing(packets)
     return {
         "running": snf.running,
         "error": str(snf.error) if snf.error else None,
-        "packets": [asdict(p) for p in new],
+        "packets": [{**asdict(p), "i": start + n} for n, p in enumerate(new)],
         "stats": {
             "packets": snf.stats.packets,
             "bytes": snf.stats.bytes,
@@ -57,6 +85,7 @@ def _capture_payload(snf: Sniffer, new: list[Any]) -> dict[str, Any]:
             ],
         },
         "anomalies": [asdict(a) for a in anomalies],
+        "defense": [asdict(a) for a in spoofing],
     }
 
 
@@ -105,7 +134,20 @@ def create_app() -> Flask:
             return jsonify({"error": str(exc)}), 400
         finally:
             Path(tmp_path).unlink(missing_ok=True)
-        return jsonify(build_report(stats=result.stats, anomalies=result.anomalies))
+        return jsonify(build_report(
+            stats=result.stats, anomalies=result.anomalies,
+            defense=detect_spoofing(result.packets),
+        ))
+
+    @app.post("/api/discover")
+    def api_discover() -> Any:
+        data = request.get_json(silent=True) or {}
+        network = str(data.get("network") or "127.0.0.1")
+        try:
+            report = discover(network, iface=data.get("iface") or None)
+        except (OSError, ValueError, RuntimeError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify(build_report(discovery=report))
 
     @app.post("/api/capture/start")
     def api_capture_start() -> Any:
@@ -115,13 +157,18 @@ def create_app() -> Flask:
                 "error": "live capture requires root/Administrator privileges "
                          "(re-run the server with sudo)"
             }), 403
+        global _raw_next
         data = request.get_json(silent=True) or {}
         with _capture_lock:
             if _sniffer is not None and _sniffer.running:
                 return jsonify({"error": "a capture is already running"}), 409
+            with _frames_lock:  # fresh frame window per capture session
+                _raw_frames.clear()
+                _raw_next = 0
             _sniffer = Sniffer(
                 iface=data.get("iface") or None,
                 bpf_filter=data.get("filter") or None,
+                on_packet=_store_raw,
             )
             _sniffer.start()
         return jsonify({"status": "started"})
@@ -135,13 +182,22 @@ def create_app() -> Flask:
                 if snf is None:
                     break
                 packets = list(snf.packets)  # atomic snapshot of the buffer
-                new, last = packets[last:], len(packets)
-                yield f"data: {json.dumps(_capture_payload(snf, new))}\n\n"
+                new, start, last = packets[last:], last, len(packets)
+                yield f"data: {json.dumps(_capture_payload(snf, new, start))}\n\n"
                 if not snf.running:
                     break
                 time.sleep(0.5)
 
         return Response(stream(), mimetype="text/event-stream")
+
+    @app.get("/api/capture/frame/<int:idx>")
+    def api_capture_frame(idx: int) -> Any:
+        """Return our own hexdump of one captured frame for the drill-down view."""
+        with _frames_lock:
+            raw = _raw_frames.get(idx)
+        if raw is None:
+            return jsonify({"error": "frame not retained (expired or out of range)"}), 404
+        return jsonify({"index": idx, "length": len(raw), "hex": hexdump(raw)})
 
     @app.post("/api/capture/stop")
     def api_capture_stop() -> Any:
@@ -150,8 +206,11 @@ def create_app() -> Flask:
             if _sniffer is None:
                 return jsonify({"error": "no capture running"}), 409
             _sniffer.stop()
-            anomalies = analyze(list(_sniffer.packets))
-            payload = build_report(stats=_sniffer.stats, anomalies=anomalies)
+            packets = list(_sniffer.packets)
+            payload = build_report(
+                stats=_sniffer.stats, anomalies=analyze(packets),
+                defense=detect_spoofing(packets),
+            )
         return jsonify(payload)
 
     return app
