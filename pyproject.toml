@@ -12,20 +12,24 @@ dependencies = [
     "scapy>=2.5",
     "rich>=13.0",
     "jinja2>=3.1",
+    "flask>=3.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "ruff", "mypy"]
 
 [project.scripts]
-netsleuth = "main:main"
+netsleuth = "netsleuth.cli:main"
+netsleuth-web = "netsleuth.web:run"
 
 [tool.setuptools]
 packages = ["netsleuth"]
 
+[tool.setuptools.package-data]
+netsleuth = ["web/templates/*.html", "web/static/*"]
+
 [tool.pytest.ini_options]
-# Put the repo root on sys.path so tests can import the top-level main.py
-# (the editable install only exposes the netsleuth package).
+# Repo root on sys.path so the top-level main.py shim is importable in tests.
 pythonpath = ["."]
 # scapy 2.7 deprecated direct DNS qd/an/ns/ar access; the API still works and
 # our decoder tolerates it. Silence only that third-party warning.

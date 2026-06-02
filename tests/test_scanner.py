@@ -9,7 +9,7 @@ from __future__ import annotations
 import socket
 import threading
 
-from main import _parse_ports
+from netsleuth.cli import _parse_ports
 from netsleuth.scanner import (
     PortState,
     Protocol,
