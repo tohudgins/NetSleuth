@@ -48,3 +48,15 @@ def test_read_pcap_roundtrip_and_proto_breakdown(samples):
     # protocol breakdown is populated by TrafficStats during analysis
     result = analyze_pcap(samples["port_scan"])
     assert result.stats.by_proto.get("TCP", 0) == len(summaries)
+
+
+def test_read_pcap_missing_file_raises_filenotfound(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        read_pcap(tmp_path / "nope.pcap")
+
+
+def test_read_pcap_invalid_file_raises_valueerror(tmp_path):
+    bogus = tmp_path / "not.pcap"
+    bogus.write_text("this is not a capture file")
+    with pytest.raises(ValueError):
+        read_pcap(bogus)

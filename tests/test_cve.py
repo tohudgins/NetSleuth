@@ -69,3 +69,23 @@ def test_enrich_scan_maps_open_ports():
     out = enrich_scan(report, fetch=lambda _url: _FAKE_NVD)
     assert set(out) == {80}
     assert out[80][0].id == "CVE-2021-23017"
+
+
+def test_enrich_scan_caches_duplicate_versions():
+    # Two open ports running the same nginx version -> only one NVD call.
+    calls = {"n": 0}
+
+    def _counting_fetch(_url):
+        calls["n"] += 1
+        return _FAKE_NVD
+
+    report = ScanReport(
+        target="127.0.0.1", scan_type="connect", proto=Protocol.TCP,
+        ports=[
+            PortResult(80, PortState.OPEN, Protocol.TCP, "Server: nginx/1.31.1", "http"),
+            PortResult(8080, PortState.OPEN, Protocol.TCP, "Server: nginx/1.31.1", "http"),
+        ],
+    )
+    out = enrich_scan(report, fetch=_counting_fetch)
+    assert set(out) == {80, 8080}
+    assert calls["n"] == 1  # cached, not queried twice

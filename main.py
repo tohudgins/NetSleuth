@@ -158,8 +158,8 @@ def _cve_enrich(
         return {}
     try:
         by_port = enrich_scan(report)
-    except OSError as exc:  # offline / API error — fail soft
-        ui.console.print(f"CVE lookup skipped (network error: {exc})", style="yellow")
+    except (OSError, ValueError) as exc:  # offline / API / bad-JSON — fail soft
+        ui.console.print(f"CVE lookup skipped ({exc})", style="yellow")
         return {}
     if by_port:
         ui.console.print(ui.render_cve_table(by_port))
@@ -225,7 +225,11 @@ def run_sniff(args: argparse.Namespace) -> int:
 
 def run_pcap(args: argparse.Namespace) -> int:
     ui.console.print(f"Analyzing capture file: {args.pcap}", style="cyan")
-    result = analyze_pcap(args.pcap)
+    try:
+        result = analyze_pcap(args.pcap)
+    except (OSError, ValueError, RuntimeError) as exc:
+        ui.console.print(f"Could not read capture: {exc}", style="bold red")
+        return 1
     ui.console.print(ui.render_traffic_table(result.stats))
     ui.console.print(ui.render_anomalies(result.anomalies))
     _forward_alerts(args, result.anomalies)

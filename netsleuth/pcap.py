@@ -22,10 +22,12 @@ from .sniffer import PacketSummary, TrafficStats, summarize
 
 try:
     from scapy.all import PcapReader
+    from scapy.error import Scapy_Exception
 
     _SCAPY_AVAILABLE = True
 except Exception:  # pragma: no cover - environment dependent
     _SCAPY_AVAILABLE = False
+    Scapy_Exception = Exception
 
 
 @dataclass
@@ -44,10 +46,18 @@ def read_pcap(path: str | Path) -> list[PacketSummary]:
     """
     if not _SCAPY_AVAILABLE:
         raise RuntimeError("scapy is required to read pcap files")
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"capture file not found: {p}")
     summaries: list[PacketSummary] = []
-    with PcapReader(str(path)) as reader:
-        for pkt in reader:
-            summaries.append(summarize(pkt))
+    try:
+        with PcapReader(str(p)) as reader:
+            for pkt in reader:
+                summaries.append(summarize(pkt))
+    except Scapy_Exception as exc:
+        # Not a capture file / corrupt / unsupported link type — normalise to a
+        # clean ValueError the caller can present without a traceback.
+        raise ValueError(f"not a valid capture file: {p} ({exc})") from exc
     return summaries
 
 

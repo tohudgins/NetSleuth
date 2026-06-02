@@ -111,13 +111,16 @@ def enrich_scan(
 ) -> dict[int, list[CVEEntry]]:
     """For each open port with a parseable banner, look up candidate CVEs."""
     out: dict[int, list[CVEEntry]] = {}
+    cache: dict[tuple[str, str], list[CVEEntry]] = {}
     for p in report.ports:
         if p.state is not PortState.OPEN or not p.banner:
             continue
         sv = parse_version(p.banner, p.service_hint)
         if sv is None:
             continue
-        cves = lookup_cves(sv, fetch=fetch, max_results=max_results)
-        if cves:
-            out[p.port] = cves
+        key = (sv.product, sv.version)
+        if key not in cache:  # avoid duplicate NVD calls for the same version
+            cache[key] = lookup_cves(sv, fetch=fetch, max_results=max_results)
+        if cache[key]:
+            out[p.port] = cache[key]
     return out
