@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from scapy.all import ARP, IP, TCP, UDP, Ether, wrpcap
+    from scapy.all import ARP, DNS, DNSQR, ICMP, IP, TCP, UDP, Ether, wrpcap
 
     _SCAPY_AVAILABLE = True
 except Exception:  # pragma: no cover - environment dependent
@@ -64,6 +64,46 @@ def build_arp_spoof() -> list[Any]:
     ]
 
 
+def build_icmp_flood(count: int = 120) -> list[Any]:
+    """Many ICMP echo packets toward one destination (ping flood / sweep)."""
+    eth = Ether(src=ATTACKER_MAC, dst=VICTIM_MAC)
+    return [
+        eth / IP(src=ATTACKER, dst=VICTIM) / ICMP()
+        for _ in range(count)
+    ]
+
+
+def build_dns_tunnel(count: int = 60) -> list[Any]:
+    """One source making many DNS queries with long, encoded-looking names."""
+    eth = Ether(src=ATTACKER_MAC, dst=SERVER_MAC)
+    resolver = "10.0.0.53"
+    pkts: list[Any] = []
+    for i in range(count):
+        label = ("d3adbeef" * 6) + f"{i:04d}"  # ~52-char encoded-looking label
+        qname = f"{label}.exfil.example.com"
+        pkts.append(eth / IP(src=ATTACKER, dst=resolver)
+                    / UDP(sport=40000 + i, dport=53)
+                    / DNS(rd=1, qd=DNSQR(qname=qname)))
+    return pkts
+
+
+def build_beacon(count: int = 12, interval: float = 30.0) -> list[Any]:
+    """Metronomic connections to one dst:port — a C2 beacon signature.
+
+    Timestamps are stamped on each frame at a fixed interval so the analyzer's
+    inter-arrival cadence check (low jitter) fires when the capture is read back.
+    """
+    eth = Ether(src=ATTACKER_MAC, dst=SERVER_MAC)
+    c2 = "10.0.0.99"
+    pkts: list[Any] = []
+    for i in range(count):
+        pkt = (eth / IP(src=ATTACKER, dst=c2)
+               / TCP(sport=40000 + i, dport=443, flags="S"))
+        pkt.time = 1_000_000.0 + i * interval
+        pkts.append(pkt)
+    return pkts
+
+
 def build_benign() -> list[Any]:
     """Normal established traffic — a few sessions, no half-open SYN floods.
 
@@ -89,6 +129,9 @@ _BUILDERS = {
     "port_scan": build_port_scan,
     "syn_flood": build_syn_flood,
     "arp_spoof": build_arp_spoof,
+    "icmp_flood": build_icmp_flood,
+    "dns_tunnel": build_dns_tunnel,
+    "beacon": build_beacon,
     "benign": build_benign,
 }
 

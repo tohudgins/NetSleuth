@@ -35,6 +35,30 @@ def test_arp_spoof_detected(samples):
     assert any(a.kind == "arp-spoof" for a in result.anomalies)
 
 
+def test_icmp_flood_detected(samples):
+    result = analyze_pcap(samples["icmp_flood"])
+    assert any(a.kind == "icmp-flood" for a in result.anomalies)
+
+
+def test_dns_tunnel_detected(samples):
+    result = analyze_pcap(samples["dns_tunnel"])
+    assert any(a.kind == "dns-tunnel" for a in result.anomalies)
+
+
+def test_beacon_detected(samples):
+    result = analyze_pcap(samples["beacon"])
+    assert any(a.kind == "beacon" for a in result.anomalies)
+
+
+def test_arp_spoof_sample_triggers_defense(samples):
+    # The same ARP-spoof fixture the analyzer flags should also raise a
+    # defense-side duplicate-IP alert from detect_spoofing.
+    from netsleuth.defense import detect_spoofing
+    result = analyze_pcap(samples["arp_spoof"])
+    alerts = detect_spoofing(result.packets)
+    assert any(a.kind == "duplicate-ip" for a in alerts)
+
+
 def test_benign_traffic_clean(samples):
     result = analyze_pcap(samples["benign"])
     assert result.anomalies == []

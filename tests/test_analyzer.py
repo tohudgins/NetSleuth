@@ -17,6 +17,18 @@ def _arp(ip, mac):
     return PacketSummary(0.0, ip, "10.0.0.255", "ARP", 42, "x", mac=mac)
 
 
+def _icmp(src, dst):
+    return PacketSummary(0.0, src, dst, "ICMP", 64, "x")
+
+
+def _dns(src, qname):
+    return PacketSummary(0.0, src, "10.0.0.53", "DNS", 80, "x", qname=qname)
+
+
+def _syn_at(src, dst, dport, ts):
+    return PacketSummary(ts, src, dst, "TCP", 60, "x", dport=dport, flags="S")
+
+
 def test_port_scan_flagged():
     pkts = [_tcp("10.0.0.5", "10.0.0.1", port) for port in range(1, 21)]
     flags = analyze(pkts, AnalysisConfig(port_scan_ports=15))
@@ -57,6 +69,52 @@ def test_single_mac_not_spoof():
     pkts = [_arp("10.0.0.1", "aa:aa:aa:aa:aa:aa") for _ in range(5)]
     flags = analyze(pkts)
     assert all(f.kind != "arp-spoof" for f in flags)
+
+
+def test_icmp_flood_flagged():
+    pkts = [_icmp("10.0.0.5", "10.0.0.1") for _ in range(120)]
+    flags = analyze(pkts, AnalysisConfig(icmp_flood_count=100))
+    assert any(f.kind == "icmp-flood" for f in flags)
+
+
+def test_dns_tunnel_flagged_on_volume_and_length():
+    long_name = "x" * 50 + ".exfil.example.com"
+    pkts = [_dns("10.0.0.5", long_name) for _ in range(60)]
+    flags = analyze(pkts, AnalysisConfig(dns_query_count=50, dns_qname_min_len=40))
+    assert any(f.kind == "dns-tunnel" for f in flags)
+
+
+def test_normal_dns_not_tunnel():
+    # Lots of queries but short, ordinary names should not trip the heuristic.
+    pkts = [_dns("10.0.0.5", "www.example.com") for _ in range(60)]
+    flags = analyze(pkts, AnalysisConfig(dns_query_count=50, dns_qname_min_len=40))
+    assert all(f.kind != "dns-tunnel" for f in flags)
+
+
+def test_beaconing_flagged_for_regular_interval():
+    # Ten connections exactly 30s apart — metronomic, should flag.
+    pkts = [_syn_at("10.0.0.5", "10.0.0.9", 443, ts=30.0 * i) for i in range(10)]
+    flags = analyze(pkts, AnalysisConfig(port_scan_ports=999))
+    assert any(f.kind == "beacon" for f in flags)
+
+
+def test_irregular_connections_not_beacon():
+    times = [0, 5, 60, 61, 200, 201, 999]
+    pkts = [_syn_at("10.0.0.5", "10.0.0.9", 443, ts=float(t)) for t in times]
+    flags = analyze(pkts, AnalysisConfig(port_scan_ports=999))
+    assert all(f.kind != "beacon" for f in flags)
+
+
+def test_new_host_flagged_against_baseline():
+    pkts = [_tcp("10.0.0.250", "10.0.0.1", 80)]
+    flags = analyze(pkts, known_hosts={"10.0.0.1", "10.0.0.5"})
+    assert any(f.kind == "new-host" and "10.0.0.250" in f.detail for f in flags)
+
+
+def test_known_host_not_flagged():
+    pkts = [_tcp("10.0.0.5", "10.0.0.1", 80)]
+    flags = analyze(pkts, known_hosts={"10.0.0.5"})
+    assert all(f.kind != "new-host" for f in flags)
 
 
 def test_clean_traffic_no_flags():
