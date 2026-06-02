@@ -22,7 +22,7 @@ from typing import Any
 from .privileges import can_raw_socket
 
 try:
-    from scapy.all import ARP, DNS, ICMP, IP, TCP, UDP, sniff
+    from scapy.all import ARP, DNS, ICMP, IP, IPv6, TCP, UDP, sniff
     from scapy.all import conf as scapy_conf
     from scapy.error import Scapy_Exception
 
@@ -86,11 +86,32 @@ def _dns_info(pkt: Any) -> str:
     return f"DNS response {qname} ({int(dns.ancount)} answer(s))"
 
 
+def _l4_summary(
+    pkt: Any, ts: float, src: str, dst: str, length: int
+) -> PacketSummary | None:
+    """TCP/UDP/DNS summary shared by IPv4 and IPv6; None if not one of those."""
+    if pkt.haslayer(DNS):
+        return PacketSummary(ts, src, dst, "DNS", length, _dns_info(pkt))
+    if pkt.haslayer(TCP):
+        tcp = pkt[TCP]
+        info = f"TCP {src}:{tcp.sport} -> {dst}:{tcp.dport} [{tcp.flags}]"
+        return PacketSummary(ts, src, dst, "TCP", length, info,
+                             sport=int(tcp.sport), dport=int(tcp.dport),
+                             flags=str(tcp.flags))
+    if pkt.haslayer(UDP):
+        udp = pkt[UDP]
+        info = f"UDP {src}:{udp.sport} -> {dst}:{udp.dport}"
+        return PacketSummary(ts, src, dst, "UDP", length, info,
+                             sport=int(udp.sport), dport=int(udp.dport))
+    return None
+
+
 def summarize(pkt: Any) -> PacketSummary:
     """Decode one scapy packet into a protocol-aware summary.
 
-    Covers ARP, DNS, TCP, UDP, and ICMP over IPv4; anything else falls back to
-    scapy's own one-line summary so capture never drops a packet silently.
+    Covers ARP, plus DNS / TCP / UDP / ICMP(v6) over both IPv4 and IPv6; anything
+    else falls back to scapy's own one-line summary so capture never drops a
+    packet silently.
     """
     ts = float(getattr(pkt, "time", None) or time.time())
     length = len(pkt)
@@ -106,26 +127,25 @@ def summarize(pkt: Any) -> PacketSummary:
     if pkt.haslayer(IP):
         ip = pkt[IP]
         src, dst = ip.src, ip.dst
-
-        if pkt.haslayer(DNS):
-            return PacketSummary(ts, src, dst, "DNS", length, _dns_info(pkt))
-        if pkt.haslayer(TCP):
-            tcp = pkt[TCP]
-            info = f"TCP {src}:{tcp.sport} -> {dst}:{tcp.dport} [{tcp.flags}]"
-            return PacketSummary(ts, src, dst, "TCP", length, info,
-                                 sport=int(tcp.sport), dport=int(tcp.dport),
-                                 flags=str(tcp.flags))
-        if pkt.haslayer(UDP):
-            udp = pkt[UDP]
-            info = f"UDP {src}:{udp.sport} -> {dst}:{udp.dport}"
-            return PacketSummary(ts, src, dst, "UDP", length, info,
-                                 sport=int(udp.sport), dport=int(udp.dport))
+        l4 = _l4_summary(pkt, ts, src, dst, length)
+        if l4 is not None:
+            return l4
         if pkt.haslayer(ICMP):
             icmp = pkt[ICMP]
             info = f"ICMP {src} -> {dst} type={icmp.type} code={icmp.code}"
             return PacketSummary(ts, src, dst, "ICMP", length, info)
-
         return PacketSummary(ts, src, dst, "IP", length, pkt.summary())
+
+    if pkt.haslayer(IPv6):
+        ip6 = pkt[IPv6]
+        src, dst = ip6.src, ip6.dst
+        l4 = _l4_summary(pkt, ts, src, dst, length)
+        if l4 is not None:
+            return l4
+        if int(ip6.nh) == 58:  # Next Header 58 = ICMPv6 (NDP, echo, etc.)
+            return PacketSummary(ts, src, dst, "ICMPv6", length,
+                                 f"ICMPv6 {src} -> {dst}")
+        return PacketSummary(ts, src, dst, "IPv6", length, pkt.summary())
 
     return PacketSummary(ts, "?", "?", "OTHER", length, pkt.summary())
 

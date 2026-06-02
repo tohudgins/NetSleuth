@@ -19,7 +19,9 @@ from netsleuth.sniffer import (
 if not _SCAPY_AVAILABLE:  # pragma: no cover - environment dependent
     pytest.skip("scapy not installed", allow_module_level=True)
 
-from scapy.all import ARP, DNS, DNSQR, ICMP, IP, TCP, UDP  # noqa: E402
+from scapy.all import (  # noqa: E402
+    ARP, DNS, DNSQR, ICMP, IP, IPv6, TCP, UDP, ICMPv6EchoRequest,
+)
 
 
 def test_summarize_tcp():
@@ -58,6 +60,28 @@ def test_summarize_dns_query():
     s = summarize(pkt)
     assert s.proto == "DNS"
     assert "example.com" in s.info
+
+
+def test_summarize_ipv6_tcp():
+    pkt = IPv6(src="2001:db8::1", dst="2001:db8::2") / TCP(sport=4321, dport=443, flags="S")
+    s = summarize(pkt)
+    assert s.proto == "TCP"
+    assert s.src == "2001:db8::1" and s.dst == "2001:db8::2"
+    assert s.dport == 443 and s.flags is not None
+
+
+def test_summarize_ipv6_udp():
+    pkt = IPv6(src="2001:db8::1", dst="2001:db8::2") / UDP(sport=5000, dport=53)
+    s = summarize(pkt)
+    assert s.proto == "UDP"
+    assert s.src == "2001:db8::1"
+
+
+def test_summarize_ipv6_icmpv6():
+    pkt = IPv6(src="2001:db8::1", dst="2001:db8::2") / ICMPv6EchoRequest()
+    s = summarize(pkt)
+    assert s.proto == "ICMPv6"
+    assert s.src == "2001:db8::1" and s.dst == "2001:db8::2"
 
 
 def test_traffic_stats_accounting():
