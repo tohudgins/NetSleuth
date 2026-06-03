@@ -23,6 +23,29 @@ def test_index_serves_dashboard(client):
     assert b"NetSleuth" in resp.data
 
 
+def test_rejects_non_loopback_host(client):
+    # DNS-rebinding: the browser would send the attacker's domain as Host.
+    resp = client.post("/api/scan", json={"target": "127.0.0.1"},
+                       base_url="http://evil.example.com")
+    assert resp.status_code == 403
+    assert "Host" in resp.get_json()["error"]
+
+
+def test_rejects_cross_origin(client):
+    resp = client.post("/api/scan", json={"target": "127.0.0.1", "ports": "22",
+                                          "connect": True, "timeout": 0.2},
+                       headers={"Origin": "http://evil.example.com"})
+    assert resp.status_code == 403
+    assert "cross-origin" in resp.get_json()["error"]
+
+
+def test_allows_loopback_origin(client):
+    resp = client.post("/api/scan", json={"target": "127.0.0.1", "ports": "22",
+                                          "connect": True, "timeout": 0.2},
+                       headers={"Origin": "http://127.0.0.1:8765"})
+    assert resp.status_code == 200
+
+
 def test_api_scan_localhost(client):
     resp = client.post("/api/scan", json={
         "target": "127.0.0.1", "ports": "22,80", "connect": True, "timeout": 0.3,

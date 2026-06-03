@@ -26,7 +26,7 @@ from netsleuth.analyzer import (
     analyze,
     analyze_stream,
 )
-from netsleuth.cve import enrich_scan
+from netsleuth.cve import DEFAULT_CVE_CACHE, enrich_scan
 from netsleuth.defense import DefenseAlert, DefenseConfig, detect_spoofing
 from netsleuth.diff import DiscoveryDiff, ScanDiff, diff_run
 from netsleuth.diff import to_dict as diff_to_dict
@@ -41,7 +41,7 @@ from netsleuth.discovery import (
 from netsleuth.pcap import analyze_pcap
 from netsleuth.privileges import privilege_notice
 from netsleuth.reporter import build_report, write_report
-from netsleuth.scanner import Protocol, ScanReport, scan
+from netsleuth.scanner import TIMING_TEMPLATES, Protocol, ScanReport, scan
 from netsleuth.sniffer import (
     PacketSummary,
     Sniffer,
@@ -76,8 +76,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ports, e.g. '22,80,443' or '1-1024' (default: 1-1024)")
     p.add_argument("--udp", action="store_true",
                    help="UDP scan instead of TCP (best-effort when unprivileged)")
-    p.add_argument("--timeout", type=float, default=1.0, help="per-port timeout (s)")
-    p.add_argument("--workers", type=int, default=100, help="thread pool size")
+    p.add_argument("--timeout", type=float, default=None,
+                   help="per-port timeout (s); overrides the -T template (default 1.0)")
+    p.add_argument("--workers", type=int, default=None,
+                   help="thread pool size; overrides the -T template (default 100)")
+    p.add_argument("-T", "--timing", type=int, choices=range(6), default=None,
+                   metavar="0-5",
+                   help="nmap-style timing template: 0 paranoid … 3 normal … 5 insane")
     p.add_argument("--connect", action="store_true",
                    help="force unprivileged connect scan even if privileged")
     p.add_argument("--show-closed", action="store_true",
@@ -147,17 +152,31 @@ def build_parser() -> argparse.ArgumentParser:
 
 # --- shared helpers -------------------------------------------------------- #
 
+def _timing(args: argparse.Namespace) -> tuple[int, float, float]:
+    """Resolve (workers, timeout, delay) from a -T template + explicit overrides.
+
+    Explicit --workers / --timeout always win over the template; with neither a
+    template nor a flag, fall back to the built-in normal defaults (100, 1.0).
+    """
+    tmpl = TIMING_TEMPLATES.get(args.timing) if args.timing is not None else None
+    workers = args.workers if args.workers is not None else (tmpl[0] if tmpl else 100)
+    timeout = args.timeout if args.timeout is not None else (tmpl[1] if tmpl else 1.0)
+    delay = tmpl[2] if tmpl else 0.0
+    return workers, timeout, delay
+
+
 def _scan(args: argparse.Namespace, proto: Protocol, *, show_progress: bool) -> ScanReport:
     ports = _parse_ports(args.ports)
+    workers, timeout, delay = _timing(args)
     if not show_progress:
-        return scan(args.target, ports, proto=proto, timeout=args.timeout,
-                    max_workers=args.workers, force_connect=args.connect)
+        return scan(args.target, ports, proto=proto, timeout=timeout,
+                    max_workers=workers, delay=delay, force_connect=args.connect)
     progress = ui.make_scan_progress()
     with progress:
         task = progress.add_task(f"scanning {args.target}", total=len(ports))
         return scan(
-            args.target, ports, proto=proto, timeout=args.timeout,
-            max_workers=args.workers, force_connect=args.connect,
+            args.target, ports, proto=proto, timeout=timeout,
+            max_workers=workers, delay=delay, force_connect=args.connect,
             on_result=lambda _r: progress.advance(task),
         )
 
@@ -343,7 +362,7 @@ def _cve_enrich(
     if not args.cve:
         return {}
     try:
-        by_port = enrich_scan(report)
+        by_port = enrich_scan(report, cache_path=DEFAULT_CVE_CACHE)
     except (OSError, ValueError) as exc:  # offline / API / bad-JSON — fail soft
         ui.console.print(f"CVE lookup skipped ({exc})", style="yellow")
         return {}
@@ -385,7 +404,11 @@ def run_discover(args: argparse.Namespace) -> int:
         ui.console.print(f"Discovery failed: {exc}", style="bold red")
         return 1
     ui.console.print(ui.render_discovery_table(report))
-    if not report.hosts:
+    if report.method == "ndp-needs-root":
+        ui.console.print(
+            "  IPv6 discovery needs raw sockets — re-run with sudo for an NDP sweep",
+            style="bold yellow")
+    elif not report.hosts:
         ui.console.print("  no hosts responded", style="dim")
 
     report_dict = build_report(discovery=report)

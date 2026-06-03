@@ -42,11 +42,12 @@ implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
   vanished, and a gateway MAC that moved (the very signal the MITM detector
   hunts live).
 - **Host & network discovery** — map the live hosts on a subnet you own: a
-  privileged ARP sweep (with MAC + best-guess vendor) or an unprivileged
-  TCP-ping sweep fallback.
+  privileged ARP sweep (with MAC + best-guess vendor), an unprivileged TCP-ping
+  fallback, and **IPv6** discovery via NDP (`ping6 ff02::1`).
 - **Port scanner** — TCP connect scan (unprivileged), half-open SYN scan
   (privileged, scapy), and UDP scan; banner grabbing incl. TLS for HTTPS; an OS
-  *family heuristic* (a coarse TTL best guess — **not** real fingerprinting).
+  *family heuristic* (a coarse TTL best guess — **not** real fingerprinting);
+  nmap-style **timing templates** (`-T0..5`, paranoid→insane).
 - **Packet sniffer** — scapy `sniff()` in a dedicated thread with a stop event;
   decodes TCP/UDP/ICMP/ARP/DNS; per-IP and per-protocol traffic stats; our own
   hex dump.
@@ -67,7 +68,9 @@ implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
   (offline, no privileges) — analyze real-world datasets legally.
 - **Alert forwarding** — emit anomaly *and* ARP-spoofing alerts as JSON-lines /
   webhook / syslog for SIEM-style integration.
-- **CVE lookup** — map detected banners to candidate CVEs via NVD (opt-in).
+- **CVE lookup** — map detected banners to CVEs via NVD (opt-in): precise,
+  version-aware **CPE** matching for known products (keyword fallback otherwise),
+  with an on-disk cache so repeat lookups are offline and instant.
 - **Graceful degradation** — unprivileged, it falls back to a connect scan and
   skips live capture instead of crashing.
 
@@ -209,8 +212,26 @@ python main.py --pcap capture.pcap --alert-jsonl alerts.jsonl
 python main.py --pcap capture.pcap --alert-webhook https://example/hook
 sudo python main.py --scan-then-sniff 127.0.0.1 --alert-syslog localhost:514
 
-# look up candidate CVEs for detected banners (queries NVD; opt-in, fails soft offline)
+# look up CVEs for detected banners (NVD; opt-in, fails soft offline; cached)
 python main.py 127.0.0.1 -p 80,22 --cve --report-dir reports
+```
+
+For a known product (OpenSSH, nginx, Apache, vsftpd) the lookup uses a precise,
+version-aware **CPE** query (`virtualMatchString`) — each result is tagged `cpe`;
+unknown products fall back to a keyword search, tagged `keyword` (a *candidate*,
+verify before acting). Results are cached at `~/.netsleuth/cve-cache.json`
+(7-day TTL), so a repeat scan resolves offline and instantly.
+
+### Stealth & politeness — scan timing (`-T0..5`)
+
+nmap-style timing templates trade speed for stealth/politeness by tuning worker
+count, per-port timeout, and inter-probe spacing. `-T0` (paranoid) is serial and
+slow; `-T3` is the default; `-T5` (insane) is fast and loud. Explicit
+`--workers`/`--timeout` override the template.
+
+```bash
+python main.py 192.168.1.10 -p 1-1024 -T2     # polite
+sudo python main.py 192.168.1.10 -p 1-65535 -T4   # aggressive SYN scan
 ```
 
 CVE results are keyword-matched *candidates* from NVD — verify before acting,
@@ -280,7 +301,10 @@ the capture thread is mutating. **The web UI uses Flask (synchronous, threaded)
 with Server-Sent Events — deliberately not async FastAPI — so this one model
 holds across the whole stack.**
 
-**The server never exposes itself.** `netsleuth-web` binds to `127.0.0.1` only
+**The server never exposes itself.** Beyond binding to loopback, every request
+is checked: a non-loopback `Host` header (the fingerprint of a DNS-rebinding
+attack) or a cross-origin `Origin` (CSRF from a malicious local page) is rejected
+with 403. `netsleuth-web` binds to `127.0.0.1` only
 and refuses non-loopback hosts: a tool that runs scans and captures must not be
 reachable over the network.
 
@@ -416,6 +440,8 @@ ruff check . && mypy netsleuth main.py && pytest -q
 - [x] Phase 8 — Windowed/streaming analyzer (one engine, two modes): rate-based
       flood detection + low-and-slow scan detection (`--stream`), incremental
       live processing that removes the per-tick O(n²) re-scan
+- [x] Phase 9 — Polish: CPE-based CVE matching + on-disk cache, IPv6 discovery
+      (NDP), web Host/Origin hardening, nmap-style scan timing templates (`-T0..5`)
 
 ## Limitations & future work
 

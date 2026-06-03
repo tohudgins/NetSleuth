@@ -148,7 +148,8 @@ function scanCard(scan) {
   const hidden = scan.ports.length - open.length;
   let rows = open.map((p) => {
     const cves = (p.cves || []).map((c) =>
-      `<div class="small"><span class="badge warn">${esc(c.id)}</span> ${esc(c.summary)}</div>`).join("");
+      `<div class="small"><span class="badge warn">${esc(c.id)}</span>
+        <span class="muted">${esc(c.match || "keyword")}</span> ${esc(c.summary)}</div>`).join("");
     return `<tr><td class="num" data-sort="${p.port}">${p.port}</td><td>${esc(p.proto)}</td>
       <td class="${stateClass(p.state)}">${esc(p.state)}</td>
       <td>${esc(p.service_hint || "")}</td>
@@ -247,7 +248,7 @@ document.getElementById("scan-form").addEventListener("submit", async (e) => {
   spin.hidden = false; out.innerHTML = "";
   try {
     const { data } = await postJSON("/api/scan", {
-      target: f.target.value, ports: f.ports.value,
+      target: f.target.value, ports: f.ports.value, timing: f.timing.value,
       udp: f.udp.checked, connect: f.connect.checked, cve: f.cve.checked,
       save: f.save.checked, diff: f.save.checked,
     });

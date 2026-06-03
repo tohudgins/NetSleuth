@@ -11,6 +11,7 @@ import threading
 
 from netsleuth.cli import _parse_ports
 from netsleuth.scanner import (
+    TIMING_TEMPLATES,
     PortState,
     Protocol,
     _connect_probe,
@@ -20,6 +21,20 @@ from netsleuth.scanner import (
     _udp_connect_probe,
     scan,
 )
+
+
+def test_timing_templates_shape():
+    assert set(TIMING_TEMPLATES) == {0, 1, 2, 3, 4, 5}
+    assert TIMING_TEMPLATES[3] == (100, 1.0, 0.0)  # T3 == built-in defaults
+    # paranoid is slower/serial than insane
+    assert TIMING_TEMPLATES[0][0] < TIMING_TEMPLATES[5][0]    # fewer workers
+    assert TIMING_TEMPLATES[0][2] > TIMING_TEMPLATES[5][2]    # longer delay
+
+
+def test_scan_with_delay_still_sorted():
+    report = scan("127.0.0.1", [80, 22, 443], force_connect=True, timeout=0.2,
+                  delay=0.001, max_workers=1)
+    assert [p.port for p in report.ports] == [22, 80, 443]
 
 
 def test_service_hint_well_known_port():

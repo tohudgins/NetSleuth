@@ -10,14 +10,41 @@ from __future__ import annotations
 import socket
 import threading
 
+from netsleuth import discovery
 from netsleuth.discovery import (
     _expand,
+    _is_ipv6,
     _tcp_ping,
     discover,
     lookup_vendor,
     subnet_of,
     tcp_ping_sweep,
 )
+
+
+def test_is_ipv6():
+    assert _is_ipv6("fe80::1") is True
+    assert _is_ipv6("2001:db8::/64") is True
+    assert _is_ipv6("192.168.1.0/24") is False
+    assert _is_ipv6("10.0.0.1") is False
+    assert _is_ipv6("localhost") is False  # hostname → not v6
+
+
+def test_discover_ipv6_privileged_uses_ndp(monkeypatch):
+    from netsleuth.discovery import Host
+    monkeypatch.setattr(discovery, "discovery_available", lambda: True)
+    monkeypatch.setattr(discovery, "ndp_sweep",
+                        lambda iface=None, timeout=3.0: [Host("fe80::5", "aa:bb:cc:dd:ee:ff", None, "ndp")])
+    report = discovery.discover("fe80::/64")
+    assert report.method == "ndp-sweep"
+    assert report.hosts[0].ip == "fe80::5"
+
+
+def test_discover_ipv6_unprivileged_needs_root(monkeypatch):
+    monkeypatch.setattr(discovery, "discovery_available", lambda: False)
+    report = discovery.discover("2001:db8::/64")
+    assert report.method == "ndp-needs-root"
+    assert report.hosts == []
 
 
 def test_subnet_of():

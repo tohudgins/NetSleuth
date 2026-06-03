@@ -96,7 +96,7 @@
             <td>
               <code class="banner">{{ p.banner or "" }}</code>
               {% for c in p.cves %}
-              <div class="small"><span class="badge warn">{{ c.id }}</span>{% if c.cvss %} CVSS {{ c.cvss }}{% endif %} — {{ c.summary }}</div>
+              <div class="small"><span class="badge warn">{{ c.id }}</span> <span class="muted">{{ c.match or "keyword" }}</span>{% if c.cvss %} CVSS {{ c.cvss }}{% endif %} — {{ c.summary }}</div>
               {% endfor %}
             </td>
           </tr>

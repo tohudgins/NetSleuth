@@ -142,11 +142,13 @@ def render_cve_table(cve_by_port: dict[int, list]) -> Table:
                   header_style="bold red", expand=False)
     table.add_column("Port", justify="right")
     table.add_column("CVE")
+    table.add_column("Match")
     table.add_column("CVSS", justify="right")
     table.add_column("Summary", overflow="fold")
     for port in sorted(cve_by_port):
         for entry in cve_by_port[port]:
-            table.add_row(str(port), escape(entry.id), entry.cvss or "—",
+            match = getattr(entry, "match", "keyword")
+            table.add_row(str(port), escape(entry.id), match, entry.cvss or "—",
                           escape(entry.summary))  # NVD text — escape markup
     return table
 

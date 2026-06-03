@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from .privileges import can_raw_socket
 
 try:
-    from scapy.all import ARP, Ether, conf as scapy_conf, srp
+    from scapy.all import ARP, ICMPv6EchoRequest, IPv6, Ether, conf as scapy_conf, srp
 
     scapy_conf.verb = 0
     _SCAPY_AVAILABLE = True
@@ -132,6 +132,14 @@ def _expand(network: str) -> list[str]:
     return [str(h) for h in net.hosts()]
 
 
+def _is_ipv6(network: str) -> bool:
+    """True if `network` is an IPv6 address or CIDR (a hostname → False)."""
+    try:
+        return ipaddress.ip_network(network, strict=False).version == 6
+    except ValueError:
+        return False
+
+
 # --- ARP sweep (privileged) ------------------------------------------------ #
 
 def arp_sweep(
@@ -159,6 +167,37 @@ def arp_sweep(
             continue
         seen.add(ip)
         hosts.append(Host(ip=ip, mac=mac, vendor=lookup_vendor(mac), method="arp"))
+    hosts.sort(key=lambda h: ipaddress.ip_address(h.ip))
+    return hosts
+
+
+# --- NDP sweep (privileged, IPv6) ------------------------------------------ #
+
+def ndp_sweep(
+    iface: str | None = None,
+    *,
+    timeout: float = 3.0,
+) -> list[Host]:
+    """Discover IPv6 hosts on the link via NDP (Neighbor Discovery).
+
+    IPv6 has no ARP and a /64 can't be enumerated, so we ping the all-nodes
+    multicast (``ff02::1``) and collect every responder's IPv6 address + MAC —
+    the standard ``ping6 ff02::1`` discovery. Needs raw-socket privileges.
+    """
+    if not _SCAPY_AVAILABLE:
+        raise RuntimeError("scapy is required for an NDP sweep")
+    request = (Ether(dst="33:33:00:00:00:01") / IPv6(dst="ff02::1")
+               / ICMPv6EchoRequest())
+    answered, _ = srp(request, timeout=timeout, iface=iface, verbose=0)
+    hosts: list[Host] = []
+    seen: set[str] = set()
+    for _sent, received in answered:
+        ip = str(received[IPv6].src)
+        mac = str(received[Ether].src)
+        if ip in seen:
+            continue
+        seen.add(ip)
+        hosts.append(Host(ip=ip, mac=mac, vendor=lookup_vendor(mac), method="ndp"))
     hosts.sort(key=lambda h: ipaddress.ip_address(h.ip))
     return hosts
 
@@ -264,10 +303,18 @@ def discover(
 ) -> DiscoveryReport:
     """Discover live hosts on ``network``, picking the method by privilege.
 
-    Uses the reliable ARP sweep when privileged; otherwise degrades to the
-    unprivileged TCP-ping sweep (rule #4). Set ``force_tcp=True`` to use the
-    connect-based sweep even when privileged (useful for tests / comparison).
+    IPv4 uses the reliable ARP sweep when privileged, else the unprivileged
+    TCP-ping fallback (rule #4). IPv6 uses an NDP multicast sweep (privileged);
+    unprivileged it can't (no raw ICMPv6, and a /64 can't be enumerated), so it
+    returns an empty result tagged ``ndp-needs-root``. Set ``force_tcp=True`` to
+    force the connect-based sweep even when privileged (tests / comparison).
     """
+    if _is_ipv6(network):
+        if discovery_available() and not force_tcp:
+            hosts = ndp_sweep(iface=iface, timeout=timeout or 3.0)
+            return DiscoveryReport(network=network, method="ndp-sweep", hosts=hosts)
+        return DiscoveryReport(network=network, method="ndp-needs-root", hosts=[])
+
     if discovery_available() and not force_tcp:
         hosts = arp_sweep(network, timeout=timeout or 2.0, iface=iface)
         return DiscoveryReport(network=network, method="arp-sweep", hosts=hosts)

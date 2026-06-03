@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import unquote
+
 from netsleuth.cve import enrich_scan, lookup_cves, parse_version
 from netsleuth.scanner import PortResult, PortState, Protocol, ScanReport
 
@@ -69,6 +71,79 @@ def test_enrich_scan_maps_open_ports():
     out = enrich_scan(report, fetch=lambda _url: _FAKE_NVD)
     assert set(out) == {80}
     assert out[80][0].id == "CVE-2021-23017"
+
+
+def test_lookup_uses_cpe_for_known_product():
+    from netsleuth.cve import ServiceVersion
+
+    seen = {}
+
+    def _fetch(url):
+        seen["url"] = url
+        return _FAKE_NVD
+
+    entries = lookup_cves(ServiceVersion("openssh", "9.0"), fetch=_fetch)
+    assert "virtualMatchString=" in seen["url"]
+    assert "cpe:2.3:a:openbsd:openssh:9.0" in unquote(seen["url"])
+    assert entries[0].match == "cpe"
+
+
+def test_lookup_falls_back_to_keyword_for_unknown_product():
+    from netsleuth.cve import ServiceVersion
+
+    seen = {}
+
+    def _fetch(url):
+        seen["url"] = url
+        return _FAKE_NVD
+
+    entries = lookup_cves(ServiceVersion("lighttpd", "1.4.59"), fetch=_fetch)
+    assert "keywordSearch=" in seen["url"]
+    assert entries[0].match == "keyword"
+
+
+def test_cache_hit_avoids_second_fetch(tmp_path):
+    from netsleuth.cve import ServiceVersion
+
+    calls = {"n": 0}
+
+    def _fetch(_url):
+        calls["n"] += 1
+        return _FAKE_NVD
+
+    cache = tmp_path / "cve.json"
+    sv = ServiceVersion("nginx", "1.31.1")
+    first = lookup_cves(sv, fetch=_fetch, cache_path=cache)
+    second = lookup_cves(sv, fetch=_fetch, cache_path=cache)
+    assert calls["n"] == 1  # second served from disk cache
+    assert cache.exists()
+    assert [e.id for e in first] == [e.id for e in second]
+
+
+def test_cache_expired_refetches(tmp_path):
+    from netsleuth.cve import ServiceVersion
+
+    calls = {"n": 0}
+
+    def _fetch(_url):
+        calls["n"] += 1
+        return _FAKE_NVD
+
+    cache = tmp_path / "cve.json"
+    sv = ServiceVersion("nginx", "1.31.1")
+    lookup_cves(sv, fetch=_fetch, cache_path=cache, ttl=0.0)  # instantly stale
+    lookup_cves(sv, fetch=_fetch, cache_path=cache, ttl=0.0)
+    assert calls["n"] == 2  # TTL=0 → never a fresh hit
+
+
+def test_corrupt_cache_degrades(tmp_path):
+    from netsleuth.cve import ServiceVersion
+
+    cache = tmp_path / "cve.json"
+    cache.write_text("not json{{{")
+    entries = lookup_cves(ServiceVersion("nginx", "1.31.1"),
+                          fetch=lambda _u: _FAKE_NVD, cache_path=cache)
+    assert entries[0].id == "CVE-2021-23017"  # ignored corrupt file, fetched fresh
 
 
 def test_enrich_scan_caches_duplicate_versions():

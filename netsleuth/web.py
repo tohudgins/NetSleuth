@@ -25,22 +25,41 @@ from pathlib import Path
 from typing import Any
 
 from collections import OrderedDict
+from urllib.parse import urlparse
 
 from flask import Flask, Response, jsonify, render_template, request
 
 from . import store
 from .analyzer import AnomalyFlag, WindowAnalyzer, analyze_stream
 from .cli import _parse_ports
-from .cve import enrich_scan
+from .cve import DEFAULT_CVE_CACHE, enrich_scan
 from .defense import DefenseConfig, detect_spoofing
 from .diff import diff_run, to_dict
 from .discovery import default_gateway, discover, discovery_available, resolve_mac
 from .pcap import analyze_pcap
 from .reporter import build_report
-from .scanner import Protocol, scan
+from .scanner import TIMING_TEMPLATES, Protocol, scan
 from .sniffer import PacketSummary, Sniffer, capture_available, hexdump
 
 _WEB_DIR = Path(__file__).resolve().parent / "web"
+
+# The server only ever serves the local user. Requiring a loopback Host defeats
+# DNS-rebinding (rebinding makes the browser send the attacker's domain as Host),
+# and requiring a loopback Origin (when present) defeats cross-origin CSRF from a
+# malicious local page. curl / same-origin browser requests pass untouched.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _host_only(value: str | None) -> str:
+    """Strip a port (and IPv6 brackets) from a Host/authority string.
+
+    "127.0.0.1:8765" → "127.0.0.1"; "[::1]:8765" → "::1"; "localhost" → "localhost".
+    """
+    if not value:
+        return ""
+    if value.startswith("["):  # bracketed IPv6, e.g. [::1]:8765
+        return value[1:].split("]", 1)[0]
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
 
 # One capture session for the single local user, guarded by a lock.
 _capture_lock = threading.Lock()
@@ -167,6 +186,16 @@ def create_app(db_path: str | Path | None = None) -> Flask:
     )
     app.config["NS_DB"] = str(db_path or store.DEFAULT_DB)
 
+    @app.before_request
+    def _guard_loopback() -> Any:
+        """Refuse non-loopback Host (DNS-rebinding) or Origin (cross-origin CSRF)."""
+        if _host_only(request.host) not in _LOOPBACK_HOSTS:
+            return jsonify({"error": "refused: non-loopback Host header"}), 403
+        origin = request.headers.get("Origin")
+        if origin and (urlparse(origin).hostname or "") not in _LOOPBACK_HOSTS:
+            return jsonify({"error": "refused: cross-origin request"}), 403
+        return None
+
     @app.get("/")
     def index() -> str:
         return render_template("dashboard.html")
@@ -177,15 +206,21 @@ def create_app(db_path: str | Path | None = None) -> Flask:
         target = str(data.get("target") or "127.0.0.1")
         ports = _parse_ports(str(data.get("ports") or "1-1024"))
         proto = Protocol.UDP if data.get("udp") else Protocol.TCP
+        timing = data.get("timing")
+        if timing not in (None, ""):
+            workers, timeout, delay = TIMING_TEMPLATES.get(
+                int(str(timing)), (100, 1.0, 0.0))
+        else:
+            workers, timeout, delay = 100, float(data.get("timeout") or 1.0), 0.0
         report = scan(
-            target, ports, proto=proto,
-            timeout=float(data.get("timeout") or 1.0),
+            target, ports, proto=proto, timeout=timeout,
+            max_workers=workers, delay=delay,
             force_connect=bool(data.get("connect")),
         )
         cves: dict[int, list[dict[str, Any]]] = {}
         if data.get("cve"):
             try:
-                by_port = enrich_scan(report)
+                by_port = enrich_scan(report, cache_path=DEFAULT_CVE_CACHE)
                 cves = {p: [asdict(e) for e in es] for p, es in by_port.items()}
             except (OSError, ValueError):
                 cves = {}

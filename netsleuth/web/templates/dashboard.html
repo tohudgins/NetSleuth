@@ -25,6 +25,17 @@
     <form id="scan-form" class="controls">
       <label>Target <input name="target" value="127.0.0.1"></label>
       <label>Ports <input name="ports" value="1-1024"></label>
+      <label>Timing
+        <select name="timing">
+          <option value="">normal</option>
+          <option value="0">T0 paranoid</option>
+          <option value="1">T1 sneaky</option>
+          <option value="2">T2 polite</option>
+          <option value="3">T3 normal</option>
+          <option value="4">T4 aggressive</option>
+          <option value="5">T5 insane</option>
+        </select>
+      </label>
       <label class="check"><input type="checkbox" name="udp"> UDP</label>
       <label class="check"><input type="checkbox" name="connect"> Force connect</label>
       <label class="check"><input type="checkbox" name="cve"> CVE lookup</label>

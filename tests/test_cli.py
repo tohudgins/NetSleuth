@@ -104,6 +104,26 @@ def test_parser_accepts_stream_flags():
     assert args.window == 5.0
 
 
+def test_timing_template_resolves():
+    args = cli.build_parser().parse_args(["127.0.0.1", "-T", "2"])
+    assert args.timing == 2
+    workers, timeout, delay = cli._timing(args)
+    assert (workers, timeout, delay) == (10, 2.0, 0.1)  # T2 polite
+
+
+def test_timing_explicit_flags_override_template():
+    args = cli.build_parser().parse_args(
+        ["127.0.0.1", "-T", "5", "--workers", "7", "--timeout", "9"])
+    workers, timeout, delay = cli._timing(args)
+    assert workers == 7 and timeout == 9.0  # explicit wins
+    assert delay == 0.0  # T5 delay
+
+
+def test_timing_default_when_unset():
+    args = cli.build_parser().parse_args(["127.0.0.1"])
+    assert cli._timing(args) == (100, 1.0, 0.0)
+
+
 def test_analysis_config_only_when_window_set():
     assert cli._analysis_config(_args()) is None
     cfg = cli._analysis_config(argparse.Namespace(window=5.0))

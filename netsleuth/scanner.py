@@ -19,12 +19,26 @@ from __future__ import annotations
 
 import socket
 import ssl
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 from .privileges import can_raw_socket
+
+# nmap-style timing templates: T -> (max_workers, per-port timeout, inter-probe
+# delay). Lower = stealthier/politer (fewer workers, longer waits, spaced
+# probes); higher = faster. T3 reproduces the built-in defaults.
+TIMING_TEMPLATES: dict[int, tuple[int, float, float]] = {
+    0: (1, 5.0, 1.0),     # paranoid — serial, one probe/second
+    1: (1, 3.0, 0.4),     # sneaky
+    2: (10, 2.0, 0.1),    # polite
+    3: (100, 1.0, 0.0),   # normal (default)
+    4: (200, 0.5, 0.0),   # aggressive
+    5: (400, 0.25, 0.0),  # insane
+}
 
 # scapy is a building block we compose, not a finished tool we orchestrate, so
 # using it still counts as "doing it ourselves". Imported lazily-friendly at the
@@ -259,6 +273,7 @@ def scan(
     proto: Protocol = Protocol.TCP,
     timeout: float = 1.0,
     max_workers: int = 100,
+    delay: float = 0.0,
     force_connect: bool = False,
     on_result: Callable[[PortResult], None] | None = None,
 ) -> ScanReport:
@@ -267,6 +282,8 @@ def scan(
     Set force_connect=True to use the TCP connect scan even when privileged
     (useful for the optional nmap-parity test). `on_result` is invoked on the
     calling thread as each port finishes — used by the UI for a progress bar.
+    `delay` spaces out probe submissions (timing templates) — with max_workers=1
+    that yields a serial, paced scan for stealth/politeness.
     """
     privileged = can_raw_socket() and _SCAPY_AVAILABLE
     if proto is Protocol.UDP:
@@ -280,7 +297,11 @@ def scan(
 
     results: list[PortResult] = []
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(probe, target, p, timeout): p for p in ports}
+        futures: dict[Any, int] = {}
+        for p in ports:
+            futures[pool.submit(probe, target, p, timeout)] = p
+            if delay:
+                time.sleep(delay)  # pace probe submission for stealthy templates
         for fut in as_completed(futures):
             try:
                 result = fut.result()
