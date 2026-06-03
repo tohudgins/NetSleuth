@@ -22,7 +22,14 @@ from netsleuth.alerts import emit_alerts
 from netsleuth.analyzer import AnomalyFlag, analyze
 from netsleuth.cve import enrich_scan
 from netsleuth.defense import DefenseAlert, DefenseConfig, detect_spoofing
-from netsleuth.discovery import DiscoveryReport, discover
+from netsleuth.discovery import (
+    DiscoveryReport,
+    default_gateway,
+    discover,
+    discovery_available,
+    resolve_mac,
+    subnet_of,
+)
 from netsleuth.pcap import analyze_pcap
 from netsleuth.privileges import privilege_notice
 from netsleuth.reporter import build_report, write_report
@@ -94,11 +101,13 @@ def build_parser() -> argparse.ArgumentParser:
     intg_grp.add_argument("--cve", action="store_true",
                           help="look up candidate CVEs for detected service versions (NVD)")
     intg_grp.add_argument("--gateway", default=None, metavar="IP",
-                          help="treat this IP as the gateway: ARP-spoofing alerts "
-                          "against it are escalated to critical")
-    intg_grp.add_argument("--known-hosts", default=None, metavar="IP,IP,…",
+                          help="gateway IP for ARP-spoof detection: its MAC is "
+                          "learned before live capture so a change alerts as "
+                          "critical (auto-detected from the route table if omitted)")
+    intg_grp.add_argument("--known-hosts", default=None, metavar="IP,…|auto",
                           help="baseline of known hosts; sources not listed are "
-                          "flagged as new devices during capture/pcap analysis")
+                          "flagged as new devices. 'auto' sweeps the local subnet "
+                          "to build the baseline (live capture only)")
 
     alert_grp = p.add_argument_group("alert forwarding (anomaly flags)")
     alert_grp.add_argument("--alert-jsonl", default=None, metavar="FILE",
@@ -170,16 +179,81 @@ def _forward_alerts(
         ui.console.print(f"alert: {line}", style="dim")
 
 
-def _defense_config(args: argparse.Namespace) -> DefenseConfig:
-    """Build the spoofing-detector config, escalating the gateway to critical."""
-    return DefenseConfig(critical_ips={args.gateway} if args.gateway else set())
+def _defense_setup(
+    args: argparse.Namespace, *, live: bool
+) -> tuple[dict[str, str] | None, DefenseConfig]:
+    """Build the (baseline, config) the spoofing detector needs.
+
+    On live capture of a network we control, resolve the gateway's real MAC
+    (explicit --gateway, else the OS default route) so a later arp-mac-change
+    against it fires as *critical*. Offline pcap can't ARP, so we only honour
+    --gateway as a critical tag. Baseline learning is trust-on-first-use.
+    """
+    gateway = args.gateway
+    if live and gateway is None:
+        gateway = default_gateway(args.iface)  # route table only, no privilege
+    config = DefenseConfig(critical_ips={gateway} if gateway else set())
+
+    baseline: dict[str, str] = {}
+    if live and gateway and discovery_available():
+        try:
+            mac = resolve_mac(gateway, iface=args.iface)
+        except (OSError, RuntimeError):
+            mac = None
+        if mac:
+            baseline[gateway] = mac
+            ui.console.print(
+                f"Baseline: gateway {gateway} is-at {mac} — ARP changes against "
+                "it will alert as critical",
+                style="dim",
+            )
+    return (baseline or None), config
 
 
-def _known_hosts(args: argparse.Namespace) -> set[str] | None:
-    """Parse --known-hosts into a baseline set, or None when unset."""
-    if not args.known_hosts:
+def _known_hosts(
+    args: argparse.Namespace, *, allow_auto: bool = True
+) -> set[str] | None:
+    """Resolve --known-hosts into a baseline set, or None when unset.
+
+    ``auto`` runs a discovery sweep of the local subnet and uses the responders
+    as the baseline, so new devices appearing in capture get flagged without
+    listing IPs by hand. ``auto`` only makes sense for live capture; offline pcap
+    analysis (``allow_auto=False``) ignores it with a note.
+    """
+    spec = args.known_hosts
+    if not spec:
         return None
-    return {h.strip() for h in args.known_hosts.split(",") if h.strip()}
+    if spec.strip().lower() == "auto":
+        if not allow_auto:
+            ui.console.print(
+                "--known-hosts auto needs a live network; ignoring for --pcap",
+                style="yellow")
+            return None
+        return _autodiscover_known_hosts(args)
+    return {h.strip() for h in spec.split(",") if h.strip()}
+
+
+def _autodiscover_known_hosts(args: argparse.Namespace) -> set[str] | None:
+    """Sweep the gateway's subnet to seed the known-host baseline."""
+    gateway = args.gateway or default_gateway(args.iface)
+    if not gateway:
+        ui.console.print(
+            "--known-hosts auto: couldn't determine the local subnet; "
+            "skipping new-host detection", style="yellow")
+        return None
+    network = subnet_of(gateway)
+    ui.console.print(f"--known-hosts auto: discovering {network}…", style="dim")
+    try:
+        report = discover(network, iface=args.iface)
+    except (OSError, ValueError, RuntimeError) as exc:
+        ui.console.print(f"--known-hosts auto failed ({exc}); skipping", style="yellow")
+        return None
+    hosts = {h.ip for h in report.hosts}
+    if hosts:
+        ui.console.print(
+            f"--known-hosts auto: baseline of {len(hosts)} host(s) on {network}",
+            style="dim")
+    return hosts or None
 
 
 def _cve_enrich(
@@ -241,6 +315,12 @@ def run_sniff(args: argparse.Namespace) -> int:
         )
         return 0
 
+    # Learn the trust-on-first-use baselines *before* capturing, so the gateway
+    # MAC and host inventory reflect a clean network and the probe traffic those
+    # lookups generate stays out of the capture we analyse.
+    baseline, defense_cfg = _defense_setup(args, live=True)
+    known = _known_hosts(args)
+
     def _on_packet(summary: PacketSummary, raw_pkt: Any) -> None:
         ui.print_packet(summary)
         if args.hex:
@@ -266,8 +346,8 @@ def run_sniff(args: argparse.Namespace) -> int:
         return 1
 
     packets = list(sniffer.packets)
-    anomalies = analyze(packets, known_hosts=_known_hosts(args))
-    spoofing = detect_spoofing(packets, config=_defense_config(args))
+    anomalies = analyze(packets, known_hosts=known)
+    spoofing = detect_spoofing(packets, baseline=baseline, config=defense_cfg)
     ui.console.print(ui.render_traffic_table(sniffer.stats))
     ui.console.print(ui.render_defense(spoofing))
     ui.console.print(ui.render_anomalies(anomalies))
@@ -283,8 +363,9 @@ def run_pcap(args: argparse.Namespace) -> int:
     except (OSError, ValueError, RuntimeError) as exc:
         ui.console.print(f"Could not read capture: {exc}", style="bold red")
         return 1
-    spoofing = detect_spoofing(result.packets, config=_defense_config(args))
-    anomalies = analyze(result.packets, known_hosts=_known_hosts(args))
+    baseline, defense_cfg = _defense_setup(args, live=False)
+    spoofing = detect_spoofing(result.packets, baseline=baseline, config=defense_cfg)
+    anomalies = analyze(result.packets, known_hosts=_known_hosts(args, allow_auto=False))
     ui.console.print(ui.render_traffic_table(result.stats))
     ui.console.print(ui.render_defense(spoofing))
     ui.console.print(ui.render_anomalies(anomalies))
@@ -329,14 +410,14 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
     anomalies: list[AnomalyFlag] = []
     spoofing: list[DefenseAlert] = []
 
+    baseline, defense_cfg = _defense_setup(args, live=True)
     known = _known_hosts(args)
-    defense_cfg = _defense_config(args)
 
     def _frame() -> Any:
         nonlocal anomalies, spoofing
         snapshot = list(sniffer.packets)  # atomic copy of the capture buffer
         anomalies = analyze(snapshot, known_hosts=known)
-        spoofing = detect_spoofing(snapshot, config=defense_cfg)
+        spoofing = detect_spoofing(snapshot, baseline=baseline, config=defense_cfg)
         return ui.render_dashboard(report, sniffer.stats, anomalies, snapshot[-12:],
                                    defense=spoofing, show_closed=args.show_closed)
 

@@ -31,8 +31,8 @@ from flask import Flask, Response, jsonify, render_template, request
 from .analyzer import analyze
 from .cli import _parse_ports
 from .cve import enrich_scan
-from .defense import detect_spoofing
-from .discovery import discover
+from .defense import DefenseConfig, detect_spoofing
+from .discovery import default_gateway, discover, discovery_available, resolve_mac
 from .pcap import analyze_pcap
 from .reporter import build_report
 from .scanner import Protocol, scan
@@ -44,6 +44,11 @@ _WEB_DIR = Path(__file__).resolve().parent / "web"
 _capture_lock = threading.Lock()
 _sniffer: Sniffer | None = None
 
+# Spoofing-detector inputs learned at capture start (gateway MAC baseline +
+# critical-IP config), so the live feed can raise a critical arp-mac-change.
+_live_baseline: dict[str, str] | None = None
+_live_defense_cfg = DefenseConfig()
+
 # Bounded store of recent raw frames so the UI can drill into any packet's
 # hexdump on demand without streaming every byte over SSE. Keyed by the packet's
 # absolute index in the capture (which matches its position in snf.packets), so
@@ -53,6 +58,27 @@ _RAW_CAP = 2000
 _raw_frames: "OrderedDict[int, bytes]" = OrderedDict()
 _raw_next = 0  # next absolute index; matches the packet's position in snf.packets
 _frames_lock = threading.Lock()
+
+
+def _learn_baseline(
+    gateway: str | None, iface: str | None
+) -> tuple[dict[str, str] | None, DefenseConfig]:
+    """Trust-on-first-use gateway MAC + critical-IP config for live capture.
+
+    Mirrors the CLI's ``_defense_setup``: resolve the gateway (explicit or the
+    OS default route) and learn its MAC so a later change alerts as critical.
+    """
+    gw = gateway or default_gateway(iface)
+    config = DefenseConfig(critical_ips={gw} if gw else set())
+    baseline: dict[str, str] = {}
+    if gw and discovery_available():
+        try:
+            mac = resolve_mac(gw, iface=iface)
+        except (OSError, RuntimeError):
+            mac = None
+        if mac:
+            baseline[gw] = mac
+    return (baseline or None), config
 
 
 def _store_raw(summary: PacketSummary, raw_pkt: Any) -> None:
@@ -70,7 +96,8 @@ def _capture_payload(
 ) -> dict[str, Any]:
     packets = list(snf.packets)
     anomalies = analyze(packets)
-    spoofing = detect_spoofing(packets)
+    spoofing = detect_spoofing(packets, baseline=_live_baseline,
+                               config=_live_defense_cfg)
     return {
         "running": snf.running,
         "error": str(snf.error) if snf.error else None,
@@ -157,21 +184,24 @@ def create_app() -> Flask:
                 "error": "live capture requires root/Administrator privileges "
                          "(re-run the server with sudo)"
             }), 403
-        global _raw_next
+        global _raw_next, _live_baseline, _live_defense_cfg
         data = request.get_json(silent=True) or {}
+        iface = data.get("iface") or None
         with _capture_lock:
             if _sniffer is not None and _sniffer.running:
                 return jsonify({"error": "a capture is already running"}), 409
             with _frames_lock:  # fresh frame window per capture session
                 _raw_frames.clear()
                 _raw_next = 0
+            _live_baseline, _live_defense_cfg = _learn_baseline(
+                data.get("gateway") or None, iface)
             _sniffer = Sniffer(
-                iface=data.get("iface") or None,
+                iface=iface,
                 bpf_filter=data.get("filter") or None,
                 on_packet=_store_raw,
             )
             _sniffer.start()
-        return jsonify({"status": "started"})
+        return jsonify({"status": "started", "baseline": _live_baseline or {}})
 
     @app.get("/api/capture/events")
     def api_capture_events() -> Response:
@@ -209,7 +239,8 @@ def create_app() -> Flask:
             packets = list(_sniffer.packets)
             payload = build_report(
                 stats=_sniffer.stats, anomalies=analyze(packets),
-                defense=detect_spoofing(packets),
+                defense=detect_spoofing(packets, baseline=_live_baseline,
+                                        config=_live_defense_cfg),
             )
         return jsonify(payload)
 

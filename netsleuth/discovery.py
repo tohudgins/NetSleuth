@@ -213,6 +213,45 @@ def tcp_ping_sweep(
     return hosts
 
 
+# --- Gateway / baseline helpers (for the spoofing detector) ---------------- #
+
+def subnet_of(ip: str, prefix: int = 24) -> str:
+    """The CIDR network an address belongs to (default /24).
+
+    Used to turn a gateway address into a sweepable local subnet for
+    ``--known-hosts auto``. Pure — no network, fully testable.
+    """
+    return str(ipaddress.ip_network(f"{ip}/{prefix}", strict=False))
+
+
+def default_gateway(iface: str | None = None) -> str | None:
+    """Best-effort default-gateway IP from scapy's routing table.
+
+    Reads the route table only (no privileges, no packets). Returns None when
+    scapy is unavailable or there is no default route. ``iface`` is accepted for
+    signature symmetry; scapy's default route is interface-agnostic here.
+    """
+    if not _SCAPY_AVAILABLE:
+        return None
+    try:
+        gw = scapy_conf.route.route("0.0.0.0")[2]
+    except Exception:  # pragma: no cover - environment dependent
+        return None
+    return gw if gw and gw != "0.0.0.0" else None
+
+
+def resolve_mac(ip: str, *, iface: str | None = None, timeout: float = 2.0) -> str | None:
+    """Resolve one host's MAC via a single ARP request (privileged).
+
+    Thin wrapper over ``arp_sweep`` for one address. Returns None if the host
+    doesn't answer. This is trust-on-first-use: it records whatever MAC currently
+    answers, so it detects a *change* during/after this point, not a host that is
+    already being impersonated when we ask.
+    """
+    hosts = arp_sweep(ip, timeout=timeout, iface=iface)
+    return hosts[0].mac if hosts else None
+
+
 # --- Public entry point ---------------------------------------------------- #
 
 def discover(

@@ -15,8 +15,15 @@ from netsleuth.discovery import (
     _tcp_ping,
     discover,
     lookup_vendor,
+    subnet_of,
     tcp_ping_sweep,
 )
+
+
+def test_subnet_of():
+    assert subnet_of("192.168.1.50") == "192.168.1.0/24"
+    assert subnet_of("10.0.0.1") == "10.0.0.0/24"
+    assert subnet_of("172.16.5.9", prefix=16) == "172.16.0.0/16"
 
 
 def test_expand_cidr():

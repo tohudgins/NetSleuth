@@ -274,8 +274,9 @@ The analyzer flags these patterns over a batch of decoded packets:
 
 These are coarse heuristics — *triage signals*, not an IDS verdict — and are
 labelled as such in every flag. Thresholds live in `AnalysisConfig` so they can
-be tuned per environment. `analyze(..., known_hosts=...)` enables the new-host
-check against a baseline (e.g. from a trusted discovery sweep).
+be tuned per environment. The new-host check runs against a known-host baseline:
+pass `--known-hosts ip,ip` explicitly, or `--known-hosts auto` to seed it from a
+live discovery sweep of your subnet.
 
 ### ARP-spoofing / MITM detector (`defense.py`)
 
@@ -290,11 +291,26 @@ ARP traffic and emits severity-rated alerts:
 | **mac-many-ips** | one MAC answering for many IPs (subnet-wide poisoning) | warning |
 | **gratuitous-arp** | a flood of unsolicited is-at replies | warning |
 
-Pass a `baseline` (IP → known-good MAC, e.g. from a discovery sweep) and a set of
-`critical_ips` (your gateway) to turn on the strongest, escalated check. Without
-a baseline the other three still work off the captured traffic alone. It surfaces
-in the CLI (`--sniff`, `--scan-then-sniff`, `--pcap`) and the web Live/Analyze
-tabs. **NetSleuth detects MITM; it never performs it.**
+The strongest check, `arp-mac-change`, needs a baseline of the gateway's
+known-good MAC. For **live capture** NetSleuth learns this automatically: before
+sniffing it resolves the gateway (explicit `--gateway`, else the OS default
+route) via a single ARP request and remembers its MAC, so a poisoner that later
+swaps the gateway MAC raises a **critical** alert. This is *trust-on-first-use* —
+it catches a change from this point on, not a gateway already being impersonated
+when capture starts. Pair it with `--known-hosts auto`, which sweeps the local
+subnet up front so new devices appearing in the capture are flagged too:
+
+```bash
+sudo python main.py --sniff --duration 30 --known-hosts auto
+sudo python main.py 192.168.1.50 --scan-then-sniff --gateway 192.168.1.1
+```
+
+Without a learned baseline (offline `--pcap`, or unprivileged) the other three
+checks still work off the captured traffic alone, and `--gateway` still escalates
+any alert against that IP to critical. The detector surfaces in the CLI
+(`--sniff`, `--scan-then-sniff`, `--pcap`) and the web Live/Analyze tabs — the web
+live-capture tab learns the gateway baseline the same way.
+**NetSleuth detects MITM; it never performs it.**
 
 ## Practice legally
 
@@ -349,6 +365,9 @@ ruff check . && mypy netsleuth main.py && pytest -q
   domain, and the unprivileged TCP-ping fallback can miss hosts that drop all
   probes. The OUI vendor table is a small, partial best-guess map, not the full
   IEEE registry.
+- The MITM detector's gateway baseline is trust-on-first-use and assumes a /24
+  for `--known-hosts auto`: it catches a MAC change *after* capture starts, not a
+  gateway already poisoned beforehand, and won't auto-detect non-/24 subnets.
 - Anomaly heuristics are stateless over a batch; a streaming/windowed analyzer
   would catch slow scans and cut false positives.
 - CVE matching is keyword-based against NVD; CPE-accurate matching would be more
