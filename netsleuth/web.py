@@ -29,7 +29,7 @@ from collections import OrderedDict
 from flask import Flask, Response, jsonify, render_template, request
 
 from . import store
-from .analyzer import analyze
+from .analyzer import AnomalyFlag, WindowAnalyzer, analyze_stream
 from .cli import _parse_ports
 from .cve import enrich_scan
 from .defense import DefenseConfig, detect_spoofing
@@ -50,6 +50,12 @@ _sniffer: Sniffer | None = None
 # critical-IP config), so the live feed can raise a critical arp-mac-change.
 _live_baseline: dict[str, str] | None = None
 _live_defense_cfg = DefenseConfig()
+
+# Per-session streaming anomaly engine: fed only new packets each SSE tick (so
+# detection is O(new), not a re-scan of the whole buffer), with the rising-edge
+# flags it raises accumulated for display.
+_live_analyzer: WindowAnalyzer | None = None
+_live_flags: list[AnomalyFlag] = []
 
 # Bounded store of recent raw frames so the UI can drill into any packet's
 # hexdump on demand without streaming every byte over SSE. Keyed by the packet's
@@ -97,7 +103,8 @@ def _capture_payload(
     snf: Sniffer, new: list[PacketSummary], start: int
 ) -> dict[str, Any]:
     packets = list(snf.packets)
-    anomalies = analyze(packets)
+    if _live_analyzer is not None:
+        _live_flags.extend(_live_analyzer.update(new))  # O(new) streaming
     spoofing = detect_spoofing(packets, baseline=_live_baseline,
                                config=_live_defense_cfg)
     return {
@@ -113,7 +120,7 @@ def _capture_payload(
                 for ip, c in snf.stats.top(10)
             ],
         },
-        "anomalies": [asdict(a) for a in anomalies],
+        "anomalies": [asdict(a) for a in _live_flags],
         "defense": [asdict(a) for a in spoofing],
     }
 
@@ -191,11 +198,12 @@ def create_app(db_path: str | Path | None = None) -> Flask:
         upload = request.files.get("file")
         if upload is None:
             return jsonify({"error": "no capture file uploaded"}), 400
+        stream = str(request.form.get("stream", "")).lower() in ("1", "true", "on")
         with tempfile.NamedTemporaryFile(suffix=".pcap", delete=False) as tmp:
             upload.save(tmp.name)
             tmp_path = tmp.name
         try:
-            result = analyze_pcap(tmp_path)
+            result = analyze_pcap(tmp_path, stream=stream)
         except (OSError, ValueError, RuntimeError) as exc:
             return jsonify({"error": str(exc)}), 400
         finally:
@@ -267,6 +275,7 @@ def create_app(db_path: str | Path | None = None) -> Flask:
                          "(re-run the server with sudo)"
             }), 403
         global _raw_next, _live_baseline, _live_defense_cfg
+        global _live_analyzer, _live_flags
         data = request.get_json(silent=True) or {}
         iface = data.get("iface") or None
         with _capture_lock:
@@ -275,6 +284,8 @@ def create_app(db_path: str | Path | None = None) -> Flask:
             with _frames_lock:  # fresh frame window per capture session
                 _raw_frames.clear()
                 _raw_next = 0
+            _live_analyzer = WindowAnalyzer(mode="window")  # fresh streaming engine
+            _live_flags = []
             _live_baseline, _live_defense_cfg = _learn_baseline(
                 data.get("gateway") or None, iface)
             _sniffer = Sniffer(
@@ -320,7 +331,8 @@ def create_app(db_path: str | Path | None = None) -> Flask:
             _sniffer.stop()
             packets = list(_sniffer.packets)
             payload = build_report(
-                stats=_sniffer.stats, anomalies=analyze(packets),
+                stats=_sniffer.stats,
+                anomalies=analyze_stream(packets),  # complete windowed verdict
                 defense=detect_spoofing(packets, baseline=_live_baseline,
                                         config=_live_defense_cfg),
             )

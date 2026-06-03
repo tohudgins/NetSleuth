@@ -95,3 +95,16 @@ def test_parser_accepts_new_flags():
     assert args.gateway == "10.0.0.1"
     assert args.known_hosts == "auto"
     assert args.discover is True
+
+
+def test_parser_accepts_stream_flags():
+    args = cli.build_parser().parse_args(
+        ["--pcap", "x.pcap", "--stream", "--window", "5"])
+    assert args.stream is True
+    assert args.window == 5.0
+
+
+def test_analysis_config_only_when_window_set():
+    assert cli._analysis_config(_args()) is None
+    cfg = cli._analysis_config(argparse.Namespace(window=5.0))
+    assert cfg is not None and cfg.window == 5.0

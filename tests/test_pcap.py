@@ -50,6 +50,17 @@ def test_beacon_detected(samples):
     assert any(a.kind == "beacon" for a in result.anomalies)
 
 
+def test_slow_scan_batch_vs_stream(samples):
+    # Batch (count) sees a plain port-scan; windowed mode recognises it as the
+    # low-and-slow variant a fixed-count threshold can't time.
+    batch = analyze_pcap(samples["slow_scan"])
+    assert any(a.kind == "port-scan" for a in batch.anomalies)
+    stream = analyze_pcap(samples["slow_scan"], stream=True)
+    kinds = {a.kind for a in stream.anomalies}
+    assert "slow-scan" in kinds
+    assert "port-scan" not in kinds  # too slow to be a "fast" scan in window mode
+
+
 def test_arp_spoof_sample_triggers_defense(samples):
     # The same ARP-spoof fixture the analyzer flags should also raise a
     # defense-side duplicate-IP alert from detect_spoofing.

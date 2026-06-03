@@ -35,6 +35,8 @@ python main.py --pcap lab/samples/arp_spoof.pcap   # try --gateway 10.0.0.1
 python main.py --pcap lab/samples/icmp_flood.pcap
 python main.py --pcap lab/samples/dns_tunnel.pcap
 python main.py --pcap lab/samples/beacon.pcap
+python main.py --pcap lab/samples/slow_scan.pcap          # batch → port-scan
+python main.py --pcap lab/samples/slow_scan.pcap --stream # windowed → slow-scan
 python main.py --pcap lab/samples/benign.pcap      # should flag nothing
 ```
 

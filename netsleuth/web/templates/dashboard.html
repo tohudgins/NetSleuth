@@ -71,6 +71,7 @@
   <section id="tab-pcap" class="panel">
     <form id="pcap-form" class="controls">
       <label>Capture file <input type="file" name="file" accept=".pcap,.pcapng,.cap"></label>
+      <label class="check"><input type="checkbox" name="stream"> Windowed analysis (rate / low-and-slow)</label>
       <button type="submit">Analyze</button>
       <span class="spinner" id="pcap-spin" hidden>analyzing…</span>
     </form>

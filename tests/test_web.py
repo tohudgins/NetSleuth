@@ -51,6 +51,20 @@ def test_api_pcap_missing_file(client):
     assert resp.status_code == 400
 
 
+def test_api_pcap_windowed_stream(client, tmp_path):
+    samples = pytest.importorskip("netsleuth.samples")
+    if not samples._SCAPY_AVAILABLE:  # pragma: no cover
+        pytest.skip("scapy not installed")
+    paths = samples.write_samples(tmp_path)
+    with paths["slow_scan"].open("rb") as fh:
+        resp = client.post(
+            "/api/pcap",
+            data={"file": (fh, "slow_scan.pcap"), "stream": "on"},
+            content_type="multipart/form-data")
+    assert resp.status_code == 200
+    assert any(a["kind"] == "slow-scan" for a in resp.get_json()["anomalies"])
+
+
 def test_capture_start_requires_privilege(client, monkeypatch):
     monkeypatch.setattr(web, "capture_available", lambda: False)
     resp = client.post("/api/capture/start", json={})

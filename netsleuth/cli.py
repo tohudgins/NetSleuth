@@ -19,7 +19,13 @@ from rich.live import Live
 
 from netsleuth import store, ui
 from netsleuth.alerts import emit_alerts
-from netsleuth.analyzer import AnomalyFlag, analyze
+from netsleuth.analyzer import (
+    AnalysisConfig,
+    AnomalyFlag,
+    WindowAnalyzer,
+    analyze,
+    analyze_stream,
+)
 from netsleuth.cve import enrich_scan
 from netsleuth.defense import DefenseAlert, DefenseConfig, detect_spoofing
 from netsleuth.diff import DiscoveryDiff, ScanDiff, diff_run
@@ -98,6 +104,11 @@ def build_parser() -> argparse.ArgumentParser:
                           help="scan, then sniff the target's open ports (live dashboard)")
     intg_grp.add_argument("--pcap", default=None, metavar="FILE",
                           help="analyze a saved capture file offline (no privileges)")
+    intg_grp.add_argument("--stream", action="store_true",
+                          help="use the windowed/rate analyzer (catches low-and-slow "
+                          "scans + flood rates) instead of whole-capture counting")
+    intg_grp.add_argument("--window", type=float, default=None, metavar="SECONDS",
+                          help="streaming window size for rate detection (default: 10)")
     intg_grp.add_argument("--report-dir", default=None,
                           help="write JSON + HTML report into this directory")
     intg_grp.add_argument("--cve", action="store_true",
@@ -212,6 +223,13 @@ def _persist_and_diff(
     finally:
         conn.close()
     return delta
+
+
+def _analysis_config(args: argparse.Namespace) -> AnalysisConfig | None:
+    """Build an AnalysisConfig only when a streaming knob was overridden."""
+    if getattr(args, "window", None):
+        return AnalysisConfig(window=args.window)
+    return None
 
 
 def _warn_history_ignored(args: argparse.Namespace) -> None:
@@ -432,7 +450,8 @@ def run_sniff(args: argparse.Namespace) -> int:
         return 1
 
     packets = list(sniffer.packets)
-    anomalies = analyze(packets, known_hosts=known)
+    # A finished live capture → windowed/rate verdict (time-aware).
+    anomalies = analyze_stream(packets, _analysis_config(args), known_hosts=known)
     spoofing = detect_spoofing(packets, baseline=baseline, config=defense_cfg)
     ui.console.print(ui.render_traffic_table(sniffer.stats))
     ui.console.print(ui.render_defense(spoofing))
@@ -444,15 +463,19 @@ def run_sniff(args: argparse.Namespace) -> int:
 
 def run_pcap(args: argparse.Namespace) -> int:
     _warn_history_ignored(args)
-    ui.console.print(f"Analyzing capture file: {args.pcap}", style="cyan")
+    mode = "windowed" if args.stream else "batch"
+    ui.console.print(f"Analyzing capture file ({mode}): {args.pcap}", style="cyan")
+    cfg = _analysis_config(args)
     try:
-        result = analyze_pcap(args.pcap)
+        result = analyze_pcap(args.pcap, cfg, stream=args.stream)
     except (OSError, ValueError, RuntimeError) as exc:
         ui.console.print(f"Could not read capture: {exc}", style="bold red")
         return 1
     baseline, defense_cfg = _defense_setup(args, live=False)
     spoofing = detect_spoofing(result.packets, baseline=baseline, config=defense_cfg)
-    anomalies = analyze(result.packets, known_hosts=_known_hosts(args, allow_auto=False))
+    detect = analyze_stream if args.stream else analyze
+    anomalies = detect(result.packets, cfg,
+                       known_hosts=_known_hosts(args, allow_auto=False))
     ui.console.print(ui.render_traffic_table(result.stats))
     ui.console.print(ui.render_defense(spoofing))
     ui.console.print(ui.render_anomalies(anomalies))
@@ -500,11 +523,16 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
 
     baseline, defense_cfg = _defense_setup(args, live=True)
     known = _known_hosts(args)
+    # Persistent windowed analyzer fed only new packets each frame — O(new) per
+    # tick instead of re-scanning the whole buffer (kills the old O(n²)).
+    wa = WindowAnalyzer(mode="window", config=_analysis_config(args), known_hosts=known)
+    fed = 0
 
     def _frame() -> Any:
-        nonlocal anomalies, spoofing
+        nonlocal anomalies, spoofing, fed
         snapshot = list(sniffer.packets)  # atomic copy of the capture buffer
-        anomalies = analyze(snapshot, known_hosts=known)
+        anomalies += wa.update(snapshot[fed:])
+        fed = len(snapshot)
         spoofing = detect_spoofing(snapshot, baseline=baseline, config=defense_cfg)
         return ui.render_dashboard(report, sniffer.stats, anomalies, snapshot[-12:],
                                    defense=spoofing, show_closed=args.show_closed)

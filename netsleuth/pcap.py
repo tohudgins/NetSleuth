@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .analyzer import AnalysisConfig, AnomalyFlag, analyze
+from .analyzer import AnalysisConfig, AnomalyFlag, analyze, analyze_stream
 from .sniffer import PacketSummary, TrafficStats, summarize
 
 try:
@@ -64,15 +64,23 @@ def read_pcap(path: str | Path) -> list[PacketSummary]:
 def analyze_pcap(
     path: str | Path,
     config: AnalysisConfig | None = None,
+    *,
+    stream: bool = False,
 ) -> PcapAnalysis:
-    """Read a capture file and run the full traffic + anomaly analysis."""
+    """Read a capture file and run the full traffic + anomaly analysis.
+
+    ``stream=True`` uses the windowed/rate analyzer over the capture's real
+    timestamps (catches low-and-slow scans and rate floods); the default is the
+    whole-capture count-based verdict.
+    """
     packets = read_pcap(path)
     stats = TrafficStats()
     for s in packets:
         stats.record(s)
+    detect = analyze_stream if stream else analyze
     return PcapAnalysis(
         path=str(path),
         packets=packets,
         stats=stats,
-        anomalies=analyze(packets, config),
+        anomalies=detect(packets, config),
     )

@@ -52,7 +52,10 @@ implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
   hex dump.
 - **Anomaly analyzer** — coarse, clearly-labelled heuristics for port scans,
   SYN floods, ARP spoofing, ICMP floods, DNS tunneling/exfil, C2 beaconing, and
-  new-host detection.
+  new-host detection. One engine, two modes: a whole-capture **count** verdict,
+  and a windowed **rate** mode (`--stream`) that catches **low-and-slow scans**
+  and true flood rates — and processes live capture incrementally (O(new), not a
+  re-scan every tick).
 - **ARP-spoofing / MITM detector** — the *defensive* side of MITM: watches the
   captured ARP traffic for poisoning signs (baseline MAC changes, duplicate IPs,
   one MAC impersonating many hosts, gratuitous-ARP floods). NetSleuth detects
@@ -158,6 +161,10 @@ python main.py --pcap path/to/real-world.pcap   # e.g. a malware-traffic capture
 # escalate spoofing against your gateway to critical, and flag unknown hosts
 python main.py --pcap lab/samples/arp_spoof.pcap --gateway 10.0.0.1
 python main.py --pcap capture.pcap --known-hosts 10.0.0.10,10.0.0.53
+
+# windowed/rate analysis — catches a low-and-slow scan a count threshold misses
+python main.py --pcap lab/samples/slow_scan.pcap            # batch → port-scan
+python main.py --pcap lab/samples/slow_scan.pcap --stream   # windowed → slow-scan
 ```
 
 The analyzer flags port-scan, SYN-flood, ARP-spoof, ICMP-flood, DNS-tunnel,
@@ -312,6 +319,21 @@ be tuned per environment. The new-host check runs against a known-host baseline:
 pass `--known-hosts ip,ip` explicitly, or `--known-hosts auto` to seed it from a
 live discovery sweep of your subnet.
 
+**One engine, two modes.** The detector above runs in *whole-capture* mode
+(absolute counts over everything) — the default for `--pcap` and a finished
+capture. A *windowed* mode (`--stream`, and what live capture uses) drives the
+same engine off packet timestamps over a sliding window, which buys two things a
+count threshold can't:
+
+| | whole / batch (default) | windowed (`--stream`, live) |
+|---|---|---|
+| **floods** | total count ≥ N | events **per second** ≥ rate (a long quiet capture won't slowly accumulate into a false positive) |
+| **scans** | distinct ports ≥ N | fast `port-scan` *and* a new **`slow-scan`** — distinct ports over a 5-min window at low rate, the low-and-slow scan a fixed count can't tell from a busy host |
+| **cost** | re-scan the whole buffer | incremental, O(new packets) per tick (kills the old per-tick O(n²)); repeats deduped by a per-alert cooldown |
+
+Time is read from each packet's captured timestamp, so windowed detection is
+deterministic and behaves identically on a live wire and a saved pcap.
+
 ### ARP-spoofing / MITM detector (`defense.py`)
 
 A focused, gateway-aware detector for man-in-the-middle activity on your wire —
@@ -391,6 +413,9 @@ ruff check . && mypy netsleuth main.py && pytest -q
       dark dashboard with SVG charts, sortable tables, and packet hexdump drill-down
 - [x] Phase 7 — Stateful history: SQLite persistence + scan/discovery diffing
       (`--save`/`--diff`/`--history`) with a web History tab — "what changed since last run"
+- [x] Phase 8 — Windowed/streaming analyzer (one engine, two modes): rate-based
+      flood detection + low-and-slow scan detection (`--stream`), incremental
+      live processing that removes the per-tick O(n²) re-scan
 
 ## Limitations & future work
 
@@ -407,8 +432,10 @@ ruff check . && mypy netsleuth main.py && pytest -q
 - History diffing covers scans and discoveries (point-in-time inventories), not
   live captures (which are time-series); it compares the latest two runs of a
   target rather than tracking per-asset first/last-seen.
-- Anomaly heuristics are stateless over a batch; a streaming/windowed analyzer
-  would catch slow scans and cut false positives.
+- The windowed analyzer drives time off captured packet timestamps (not wall
+  clock), and re-alerts a *sustained* condition once per cooldown rather than
+  tracking a single episode; a wall-clock `watch` mode and per-flow reassembly
+  remain future work.
 - CVE matching is keyword-based against NVD; CPE-accurate matching would be more
   precise.
 - Nice-to-have: a recorded `docs/demo.gif` of the dashboard catching an attack.

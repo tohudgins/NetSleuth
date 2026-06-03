@@ -104,6 +104,24 @@ def build_beacon(count: int = 12, interval: float = 30.0) -> list[Any]:
     return pkts
 
 
+def build_slow_scan(ports: int = 25, interval: float = 8.0) -> list[Any]:
+    """A low-and-slow port scan: distinct ports, spaced out over minutes.
+
+    Each SYN lands ~`interval` seconds apart, so no 10-second window ever holds
+    enough ports to look like a *fast* scan — only the windowed analyzer's long
+    slow-scan window catches it. (Batch mode flags it as a plain port-scan by
+    count, which is the point of the side-by-side demo.)
+    """
+    eth = Ether(src=ATTACKER_MAC, dst=VICTIM_MAC)
+    pkts: list[Any] = []
+    for i in range(ports):
+        pkt = (eth / IP(src=ATTACKER, dst=VICTIM)
+               / TCP(sport=40000 + i, dport=1000 + i, flags="S"))
+        pkt.time = 1_000_000.0 + i * interval
+        pkts.append(pkt)
+    return pkts
+
+
 def build_benign() -> list[Any]:
     """Normal established traffic — a few sessions, no half-open SYN floods.
 
@@ -132,6 +150,7 @@ _BUILDERS = {
     "icmp_flood": build_icmp_flood,
     "dns_tunnel": build_dns_tunnel,
     "beacon": build_beacon,
+    "slow_scan": build_slow_scan,
     "benign": build_benign,
 }
 
