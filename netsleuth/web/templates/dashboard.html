@@ -17,6 +17,7 @@
     <button class="tab" data-tab="discover">Discover</button>
     <button class="tab" data-tab="live">Live capture</button>
     <button class="tab" data-tab="pcap">Analyze capture</button>
+    <button class="tab" data-tab="history">History</button>
   </nav>
 
   <!-- SCAN -->
@@ -27,6 +28,7 @@
       <label class="check"><input type="checkbox" name="udp"> UDP</label>
       <label class="check"><input type="checkbox" name="connect"> Force connect</label>
       <label class="check"><input type="checkbox" name="cve"> CVE lookup</label>
+      <label class="check"><input type="checkbox" name="save"> Save to history (+ diff)</label>
       <button type="submit">Run scan</button>
       <span class="spinner" id="scan-spin" hidden>scanning…</span>
     </form>
@@ -38,6 +40,7 @@
     <form id="discover-form" class="controls">
       <label>Network <input name="network" value="127.0.0.1" placeholder="e.g. 192.168.1.0/24"></label>
       <label>Interface <input name="iface" placeholder="en0 (blank = default)"></label>
+      <label class="check"><input type="checkbox" name="save"> Save to history (+ diff)</label>
       <button type="submit">Discover hosts</button>
       <span class="spinner" id="discover-spin" hidden>sweeping…</span>
     </form>
@@ -73,6 +76,16 @@
     </form>
     <p class="muted small">Tip: generate samples with <code>python lab/generate_samples.py</code>, or use a public capture.</p>
     <div id="pcap-results" class="results"></div>
+  </section>
+
+  <!-- HISTORY -->
+  <section id="tab-history" class="panel">
+    <div class="controls">
+      <button type="button" id="history-refresh">Refresh</button>
+      <span class="muted small">Saved scan &amp; discovery runs. Click one to view it and what changed since the run before it.</span>
+    </div>
+    <div id="history-list" class="results"></div>
+    <div id="history-detail" class="results"></div>
   </section>
 
   <footer class="muted small">NetSleuth · localhost only · live capture &amp; ARP sweep need sudo · heuristics, not an IDS</footer>

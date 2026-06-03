@@ -53,6 +53,11 @@
     .anom.info .kind { color:var(--accent); }
     .anom.critical { border-left-color:#7f1d1d; background:#fee2e2; }
     .anom.critical .kind { color:#7f1d1d; }
+    .delta { font-size:.9rem; margin:4px 0; }
+    .delta .add { color:var(--open); font-weight:700; }
+    .delta .del { color:var(--closed); font-weight:700; }
+    .delta .chg { color:var(--filt); font-weight:700; }
+    .delta .crit { color:#7f1d1d; font-weight:700; }
     .muted { color:var(--muted); } .small { font-size:.8rem; }
   </style>
 </head>
@@ -126,6 +131,27 @@
           {% endfor %}
         </tbody>
       </table>
+    </div>
+    {% endif %}
+
+    {% if diff %}
+    <div class="card">
+      <h2>Changes since last run</h2>
+      {% if diff.empty %}
+        <span class="badge ok">no changes</span>
+      {% elif diff.kind == "scan" %}
+        {% for p in diff.ports_opened %}<div class="delta"><span class="add">+ opened</span> port {{ p }}</div>{% endfor %}
+        {% for p in diff.ports_closed %}<div class="delta"><span class="del">− closed</span> port {{ p }}</div>{% endfor %}
+        {% for c in diff.service_changed %}<div class="delta"><span class="chg">~ service</span> port {{ c.port }}: {{ c.from or "—" }} → {{ c.to or "—" }}</div>{% endfor %}
+        {% for p in diff.banner_changed %}<div class="delta"><span class="chg">~ banner</span> port {{ p }} changed</div>{% endfor %}
+        {% if diff.os_changed %}<div class="delta"><span class="chg">~ OS guess</span> {{ diff.os_changed.from or "—" }} → {{ diff.os_changed.to or "—" }}</div>{% endif %}
+      {% elif diff.kind == "discovery" %}
+        {% for h in diff.hosts_added %}<div class="delta"><span class="add">+ host</span> {{ h.ip }}{% if h.mac %} ({{ h.mac }}){% endif %}</div>{% endfor %}
+        {% for h in diff.hosts_removed %}<div class="delta"><span class="del">− host</span> {{ h.ip }}</div>{% endfor %}
+        {% for c in diff.mac_changed %}<div class="delta"><span class="crit">! MAC changed</span> {{ c.ip }}: {{ c.from }} → {{ c.to }} (possible spoofing)</div>{% endfor %}
+        {% for c in diff.vendor_changed %}<div class="delta"><span class="chg">~ vendor</span> {{ c.ip }}: {{ c.from or "—" }} → {{ c.to or "—" }}</div>{% endfor %}
+        {% for c in diff.ports_changed %}<div class="delta"><span class="chg">~ ports</span> {{ c.ip }}: {{ c.from | join(", ") or "—" }} → {{ c.to | join(", ") or "—" }}</div>{% endfor %}
+      {% endif %}
     </div>
     {% endif %}
 

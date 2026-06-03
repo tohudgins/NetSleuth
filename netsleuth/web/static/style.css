@@ -153,6 +153,15 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-
 .detail-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: .8rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
 .hex { margin: 0; padding: 12px; font-family: ui-monospace, monospace; font-size: .76rem; color: #aebfda; overflow: auto; max-height: 340px; white-space: pre; }
 
+/* run-diff deltas + history */
+.delta { font-size: .88rem; padding: 3px 0; }
+.delta span:first-child { font-weight: 700; margin-right: 6px; }
+.delta .add { color: var(--open); }
+.delta .del { color: var(--closed); }
+.delta .chg { color: var(--filt); }
+.delta .crit { color: var(--crit); }
+.hist-row { cursor: pointer; }
+
 .muted { color: var(--muted); } .small { font-size: .82rem; }
 footer { padding: 18px 24px; border-top: 1px solid var(--line); margin-top: 10px; }
 

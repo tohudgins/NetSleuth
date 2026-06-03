@@ -18,6 +18,7 @@ from rich.table import Table
 
 from .analyzer import AnomalyFlag
 from .defense import DefenseAlert
+from .diff import DiscoveryDiff, ScanDiff
 from .discovery import DiscoveryReport
 from .scanner import PortState, ScanReport
 from .sniffer import PacketSummary, TrafficStats
@@ -184,6 +185,67 @@ def render_defense(alerts: list[DefenseAlert]) -> Panel:
         body = "\n".join(lines)
     return Panel(body, title="ARP-spoofing / MITM alerts (heuristic)",
                  border_style="red")
+
+
+def render_history_table(rows: list) -> Table:
+    """Table of stored runs for the --history listing (rows are sqlite3.Row)."""
+    table = Table(title="Run history", header_style="bold cyan", expand=False)
+    table.add_column("ID", justify="right")
+    table.add_column("When (UTC)")
+    table.add_column("Kind")
+    table.add_column("Target")
+    table.add_column("Version")
+    for r in rows:
+        table.add_row(str(r["id"]), str(r["created_at"]), r["kind"],
+                      str(r["target"]), r["tool_version"])
+    return table
+
+
+def render_scan_diff(diff: ScanDiff) -> Panel:
+    """Panel summarising what changed between this scan and the previous one."""
+    if diff.empty:
+        body: RenderableType = "[green]no changes since last run[/green]"
+    else:
+        lines = []
+        for p in diff.ports_opened:
+            lines.append(f"[green]+ opened[/green] port {p}")
+        for p in diff.ports_closed:
+            lines.append(f"[red]- closed[/red] port {p}")
+        for c in diff.service_changed:
+            lines.append(f"[yellow]~ service[/yellow] port {c['port']}: "
+                         f"{c['from'] or '—'} → {c['to'] or '—'}")
+        for p in diff.banner_changed:
+            lines.append(f"[yellow]~ banner[/yellow] port {p} changed")
+        if diff.os_changed:
+            lines.append(f"[yellow]~ OS guess[/yellow] {diff.os_changed['from'] or '—'} "
+                         f"→ {diff.os_changed['to'] or '—'}")
+        body = "\n".join(lines)
+    return Panel(body, title="Changes since last run", border_style="cyan")
+
+
+def render_discovery_diff(diff: DiscoveryDiff) -> Panel:
+    """Panel summarising host/MAC/port changes between two discovery sweeps."""
+    if diff.empty:
+        body: RenderableType = "[green]no changes since last run[/green]"
+    else:
+        lines = []
+        for h in diff.hosts_added:
+            mac = f" ({h['mac']})" if h.get("mac") else ""
+            lines.append(f"[green]+ host[/green] {h['ip']}{escape(mac)}")
+        for h in diff.hosts_removed:
+            lines.append(f"[red]- host[/red] {h['ip']}")
+        for c in diff.mac_changed:  # the security-relevant one
+            lines.append(f"[bold red]! MAC changed[/bold red] {c['ip']}: "
+                         f"{c['from']} → {c['to']} (possible spoofing)")
+        for c in diff.vendor_changed:
+            lines.append(f"[yellow]~ vendor[/yellow] {c['ip']}: "
+                         f"{c['from'] or '—'} → {c['to'] or '—'}")
+        for c in diff.ports_changed:
+            frm = ", ".join(map(str, c["from"])) or "—"
+            to = ", ".join(map(str, c["to"])) or "—"
+            lines.append(f"[yellow]~ ports[/yellow] {c['ip']}: {frm} → {to}")
+        body = "\n".join(lines)
+    return Panel(body, title="Changes since last run", border_style="cyan")
 
 
 def render_anomalies(anomalies: list[AnomalyFlag]) -> Panel:

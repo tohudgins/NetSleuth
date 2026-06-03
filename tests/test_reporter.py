@@ -113,6 +113,23 @@ def test_html_omits_discovery_when_absent():
     assert "MITM alerts" not in html
 
 
+def test_build_report_and_html_diff_section():
+    diff = {"kind": "discovery", "empty": False, "network": "10.0.0.0/24",
+            "hosts_added": [{"ip": "10.0.0.9", "mac": "aa:bb:cc:dd:ee:ff"}],
+            "hosts_removed": [], "vendor_changed": [], "ports_changed": [],
+            "mac_changed": [{"ip": "10.0.0.1", "from": "aa", "to": "bb"}]}
+    rep = build_report(diff=diff)
+    assert rep["diff"]["kind"] == "discovery"
+    html = to_html(rep)
+    assert "Changes since last run" in html
+    assert "10.0.0.9" in html
+    assert "MAC changed" in html  # the security-relevant delta
+
+
+def test_html_omits_diff_when_absent():
+    assert "Changes since last run" not in to_html(build_report(scan=_scan_report()))
+
+
 def test_open_filtered_state_css_class():
     report = ScanReport(
         target="127.0.0.1", scan_type="udp-connect", proto=Protocol.UDP,

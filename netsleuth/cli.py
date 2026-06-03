@@ -17,11 +17,13 @@ from typing import Any
 
 from rich.live import Live
 
-from netsleuth import ui
+from netsleuth import store, ui
 from netsleuth.alerts import emit_alerts
 from netsleuth.analyzer import AnomalyFlag, analyze
 from netsleuth.cve import enrich_scan
 from netsleuth.defense import DefenseAlert, DefenseConfig, detect_spoofing
+from netsleuth.diff import DiscoveryDiff, ScanDiff, diff_run
+from netsleuth.diff import to_dict as diff_to_dict
 from netsleuth.discovery import (
     DiscoveryReport,
     default_gateway,
@@ -109,6 +111,18 @@ def build_parser() -> argparse.ArgumentParser:
                           "flagged as new devices. 'auto' sweeps the local subnet "
                           "to build the baseline (live capture only)")
 
+    hist_grp = p.add_argument_group("run history (scan / discovery)")
+    hist_grp.add_argument("--save", action="store_true",
+                          help="save this scan/discovery run to the history DB")
+    hist_grp.add_argument("--diff", action="store_true",
+                          help="compare to the previous saved run of this target "
+                          "(then save). Re-run the same target+ports to compare "
+                          "like-for-like")
+    hist_grp.add_argument("--history", action="store_true",
+                          help="list stored runs and exit")
+    hist_grp.add_argument("--db", default=str(store.DEFAULT_DB), metavar="PATH",
+                          help="history DB path (default: ~/.netsleuth/history.db)")
+
     alert_grp = p.add_argument_group("alert forwarding (anomaly flags)")
     alert_grp.add_argument("--alert-jsonl", default=None, metavar="FILE",
                            help="append anomaly flags as JSON-lines to FILE")
@@ -157,6 +171,54 @@ def _write_reports(
     ui.console.print(
         f"Reports written: {paths['json']} and {paths['html']}", style="green"
     )
+
+
+def _write_report_dict(
+    args: argparse.Namespace, report: dict[str, Any], *, default_dir: str | None = None
+) -> None:
+    """Write a prebuilt report dict to JSON + HTML if an output dir is set."""
+    out = args.report_dir or default_dir
+    if not out:
+        return
+    paths = write_report(out, report)
+    ui.console.print(
+        f"Reports written: {paths['json']} and {paths['html']}", style="green"
+    )
+
+
+def _persist_and_diff(
+    args: argparse.Namespace, kind: str, target: str, report: dict[str, Any]
+) -> ScanDiff | DiscoveryDiff | None:
+    """Save the run and/or diff it against the previous one (when requested).
+
+    Returns the diff to render (None when --diff wasn't asked, there's no prior
+    run, or only --save was given). The run is stored *without* the diff — the
+    delta is always derived from two stored snapshots.
+    """
+    if not (args.save or args.diff):
+        return None
+    conn = store.connect(args.db)
+    try:
+        delta: ScanDiff | DiscoveryDiff | None = None
+        if args.diff:
+            prev = store.previous_run(conn, kind, target)
+            if prev is None:
+                ui.console.print(
+                    "No prior run for this target — saving it as the baseline.",
+                    style="dim")
+            else:
+                delta = diff_run(kind, prev, report)
+        store.save_run(conn, kind, target, report)
+    finally:
+        conn.close()
+    return delta
+
+
+def _warn_history_ignored(args: argparse.Namespace) -> None:
+    if args.save or args.diff:
+        ui.console.print(
+            "--save/--diff apply to scan and --discover only; ignored here",
+            style="yellow")
 
 
 def _forward_alerts(
@@ -288,7 +350,12 @@ def run_scan(args: argparse.Namespace) -> int:
         ui.console.print("  no open ports found", style="dim")
 
     cves = _cve_enrich(args, report)
-    _write_reports(args, scan_report=report, cves=cves)
+    report_dict = build_report(scan=report, cves=cves)
+    delta = _persist_and_diff(args, "scan", report.target, report_dict)
+    if delta is not None:
+        ui.console.print(ui.render_scan_diff(delta))  # type: ignore[arg-type]
+        report_dict["diff"] = diff_to_dict(delta)
+    _write_report_dict(args, report_dict)
     return 0
 
 
@@ -302,11 +369,30 @@ def run_discover(args: argparse.Namespace) -> int:
     ui.console.print(ui.render_discovery_table(report))
     if not report.hosts:
         ui.console.print("  no hosts responded", style="dim")
-    _write_reports(args, discovery=report)
+
+    report_dict = build_report(discovery=report)
+    delta = _persist_and_diff(args, "discovery", report.network, report_dict)
+    if delta is not None:
+        ui.console.print(ui.render_discovery_diff(delta))  # type: ignore[arg-type]
+        report_dict["diff"] = diff_to_dict(delta)
+    _write_report_dict(args, report_dict)
+    return 0
+
+
+def run_history(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    try:
+        rows = store.list_runs(conn)
+    finally:
+        conn.close()
+    ui.console.print(ui.render_history_table(rows))
+    if not rows:
+        ui.console.print("  no runs stored yet — use --save or --diff", style="dim")
     return 0
 
 
 def run_sniff(args: argparse.Namespace) -> int:
+    _warn_history_ignored(args)
     if not capture_available():
         ui.console.print(
             "Live capture needs raw-socket privileges (scapy + root/Administrator). "
@@ -357,6 +443,7 @@ def run_sniff(args: argparse.Namespace) -> int:
 
 
 def run_pcap(args: argparse.Namespace) -> int:
+    _warn_history_ignored(args)
     ui.console.print(f"Analyzing capture file: {args.pcap}", style="cyan")
     try:
         result = analyze_pcap(args.pcap)
@@ -376,6 +463,7 @@ def run_pcap(args: argparse.Namespace) -> int:
 
 
 def run_scan_then_sniff(args: argparse.Namespace) -> int:
+    _warn_history_ignored(args)
     # Always TCP for the scan stage so we have ports to focus the capture on.
     report = _scan(args, Protocol.TCP, show_progress=True)
     open_ports = report.open_ports
@@ -446,6 +534,10 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # History listing is an offline DB read — no target, no privileges.
+    if args.history:
+        return run_history(args)
 
     # PCAP analysis is offline and needs no privileges, so skip the notice.
     if args.pcap:

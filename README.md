@@ -20,6 +20,7 @@ implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
 - [Web dashboard](#web-dashboard)
 - [Usage (CLI)](#usage-cli)
 - [Analyzing real-world captures (blue-team)](#analyzing-real-world-captures-blue-team)
+- [History & diff](#history--diff--what-changed-since-last-time)
 - [Alert forwarding + CVE lookup](#alert-forwarding--cve-lookup)
 - [Architecture](#architecture)
 - [Design decisions](#design-decisions)
@@ -36,6 +37,10 @@ implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
   hosts, analyze uploaded captures, and watch live capture stream in real time:
   SVG protocol donut + traffic-over-time chart, sortable tables, and a
   click-to-inspect packet hexdump.
+- **History & diff** — save scans/discoveries to a local SQLite DB and answer
+  *"what changed since last time?"* — newly-open ports, hosts that appeared or
+  vanished, and a gateway MAC that moved (the very signal the MITM detector
+  hunts live).
 - **Host & network discovery** — map the live hosts on a subnet you own: a
   privileged ARP sweep (with MAC + best-guess vendor) or an unprivileged
   TCP-ping sweep fallback.
@@ -160,6 +165,31 @@ beacon, and new-host patterns (and the spoofing detector raises its own alerts),
 writing the same JSON/HTML report as the live modes. The lab ships a sample
 capture for each of these.
 
+### History & diff — "what changed since last time?"
+
+Make the tool *stateful*: persist a scan or discovery and compare it to the last
+saved run of the same target. A changed gateway MAC between two sweeps is exactly
+the ARP-poisoning signal the live detector hunts — now visible over time.
+
+```bash
+# save a run; --diff also compares to the previous saved run of this target
+python main.py 127.0.0.1 -p 1-1024 --save
+python main.py 127.0.0.1 -p 1-1024 --diff          # → "+ opened port 8080", etc.
+sudo python main.py 192.168.1.0/24 --discover --diff   # → "+ host …", "! MAC changed …"
+
+# list everything stored, and pick a custom DB location
+python main.py --history
+python main.py 127.0.0.1 --diff --db /tmp/lab.db
+```
+
+Runs live in `~/.netsleuth/history.db` by default (override with `--db`).
+Persistence is **explicit** — nothing is written unless you pass `--save`/`--diff`.
+A scan diff is most meaningful when the two runs cover the **same ports** (a port
+absent from one run can't be told apart from a closed one), so re-run the same
+target + port spec to compare like-for-like. In the **web dashboard**, tick *Save
+to history* on the Scan/Discover tabs, then open the **History** tab to browse
+past runs and see each one's diff against its predecessor.
+
 ### Alert forwarding + CVE lookup
 
 Forward detected anomalies **and ARP-spoofing alerts** into your alerting
@@ -200,6 +230,10 @@ they are not a confirmed-vulnerable verdict.
               ▼         ▼           ▼            ▼             │
           ui.py     reporter.py   alerts.py ◄─────────────────┘
         (rich)    (JSON + HTML)  (jsonl/webhook/syslog)
+                        │
+                   store.py (SQLite run history) ──► diff.py
+                   (--save / --diff / --history)    (ScanDiff / DiscoveryDiff:
+                                                     what changed since last run)
 ```
 
 Dependencies point **inward**: presentation (`ui`, `web`), serialization
@@ -355,6 +389,8 @@ ruff check . && mypy netsleuth main.py && pytest -q
 - [x] Phase 6 — Host & network discovery, ARP-spoofing/MITM detector, deeper anomaly
       heuristics (ICMP flood, DNS tunneling, beaconing, new-host), and a polished
       dark dashboard with SVG charts, sortable tables, and packet hexdump drill-down
+- [x] Phase 7 — Stateful history: SQLite persistence + scan/discovery diffing
+      (`--save`/`--diff`/`--history`) with a web History tab — "what changed since last run"
 
 ## Limitations & future work
 
@@ -368,6 +404,9 @@ ruff check . && mypy netsleuth main.py && pytest -q
 - The MITM detector's gateway baseline is trust-on-first-use and assumes a /24
   for `--known-hosts auto`: it catches a MAC change *after* capture starts, not a
   gateway already poisoned beforehand, and won't auto-detect non-/24 subnets.
+- History diffing covers scans and discoveries (point-in-time inventories), not
+  live captures (which are time-series); it compares the latest two runs of a
+  target rather than tracking per-asset first/last-seen.
 - Anomaly heuristics are stateless over a batch; a streaming/windowed analyzer
   would catch slow scans and cut false positives.
 - CVE matching is keyword-based against NVD; CPE-accurate matching would be more

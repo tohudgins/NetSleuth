@@ -10,8 +10,9 @@ from netsleuth.web import create_app
 
 
 @pytest.fixture
-def client():
-    app = create_app()
+def client(tmp_path):
+    # Isolated history DB per test so nothing touches the real ~/.netsleuth.
+    app = create_app(db_path=tmp_path / "history.db")
     app.config.update(TESTING=True)
     return app.test_client()
 
@@ -91,6 +92,41 @@ def test_api_discover_force_tcp_localhost(client):
     body = resp.get_json()
     assert body["discovery"]["network"] == "127.0.0.1"
     assert "hosts" in body["discovery"]
+
+
+def test_history_empty_then_save_then_list(client):
+    assert client.get("/api/history").get_json() == {"runs": []}
+    # Save a scan run, then it should appear in history.
+    client.post("/api/scan", json={"target": "127.0.0.1", "ports": "22",
+                                   "connect": True, "timeout": 0.2, "save": True})
+    runs = client.get("/api/history").get_json()["runs"]
+    assert len(runs) == 1
+    assert runs[0]["kind"] == "scan" and runs[0]["target"] == "127.0.0.1"
+
+
+def test_history_diff_endpoint(client):
+    # Two scans of the same target → the second run's /diff compares to the first.
+    client.post("/api/scan", json={"target": "127.0.0.1", "ports": "22",
+                                   "connect": True, "timeout": 0.2, "save": True})
+    r2 = client.post("/api/scan", json={"target": "127.0.0.1", "ports": "22",
+                                        "connect": True, "timeout": 0.2, "save": True})
+    assert "diff" not in r2.get_json()  # save-only, no diff requested
+    runs = client.get("/api/history").get_json()["runs"]
+    latest_id = runs[0]["id"]
+    diff = client.get(f"/api/history/{latest_id}/diff").get_json()["diff"]
+    assert diff is not None and diff["kind"] == "scan" and diff["empty"] is True
+
+
+def test_scan_with_diff_attaches_delta(client):
+    client.post("/api/scan", json={"target": "127.0.0.1", "ports": "22",
+                                   "connect": True, "timeout": 0.2, "save": True})
+    r2 = client.post("/api/scan", json={"target": "127.0.0.1", "ports": "22",
+                                        "connect": True, "timeout": 0.2, "diff": True})
+    assert r2.get_json().get("diff", {}).get("kind") == "scan"
+
+
+def test_history_run_not_found(client):
+    assert client.get("/api/history/9999").status_code == 404
 
 
 def test_capture_frame_hexdump(client):

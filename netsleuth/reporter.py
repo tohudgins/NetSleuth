@@ -34,12 +34,14 @@ def build_report(
     cves: dict[int, list[dict[str, Any]]] | None = None,
     discovery: DiscoveryReport | None = None,
     defense: list[DefenseAlert] | None = None,
+    diff: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the unified, JSON-serialisable report structure.
 
     ``cves`` maps a port to a list of already-serialised CVE dicts (id/summary/
     cvss); they are attached to the matching port entry. ``discovery`` adds a
-    host inventory; ``defense`` adds ARP-spoofing alerts.
+    host inventory; ``defense`` adds ARP-spoofing alerts; ``diff`` adds the
+    change-since-last-run delta (already serialised via ``diff.to_dict``).
     """
     report: dict[str, Any] = {
         "tool": "NetSleuth",
@@ -108,6 +110,9 @@ def build_report(
             {"kind": a.kind, "severity": a.severity, "detail": a.detail}
             for a in defense
         ]
+
+    if diff is not None:
+        report["diff"] = diff
 
     return report
 

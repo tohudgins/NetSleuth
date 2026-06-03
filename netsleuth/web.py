@@ -28,10 +28,12 @@ from collections import OrderedDict
 
 from flask import Flask, Response, jsonify, render_template, request
 
+from . import store
 from .analyzer import analyze
 from .cli import _parse_ports
 from .cve import enrich_scan
 from .defense import DefenseConfig, detect_spoofing
+from .diff import diff_run, to_dict
 from .discovery import default_gateway, discover, discovery_available, resolve_mac
 from .pcap import analyze_pcap
 from .reporter import build_report
@@ -116,12 +118,47 @@ def _capture_payload(
     }
 
 
-def create_app() -> Flask:
+def _maybe_persist(
+    app: Flask, data: dict[str, Any], kind: str, target: str, report: dict[str, Any]
+) -> None:
+    """Save and/or diff a scan/discovery run when the request asks for it.
+
+    Saves the *base* report (no diff), then attaches a `diff` to the response so
+    the browser can render "what changed" without a second round-trip. Uses a
+    fresh sqlite connection — they aren't safe to share across Flask threads.
+    """
+    if not (data.get("save") or data.get("diff")):
+        return
+    conn = store.connect(app.config["NS_DB"])
+    try:
+        delta = None
+        if data.get("diff"):
+            prev = store.previous_run(conn, kind, target)
+            if prev is not None:
+                delta = diff_run(kind, prev, report)
+        store.save_run(conn, kind, target, report)
+    finally:
+        conn.close()
+    if delta is not None:
+        report["diff"] = to_dict(delta)
+
+
+def _run_identity(report: dict[str, Any]) -> tuple[str, str] | None:
+    """(kind, target) for a stored run, or None if it isn't diffable."""
+    if "scan" in report:
+        return "scan", str(report["scan"]["target"])
+    if "discovery" in report:
+        return "discovery", str(report["discovery"]["network"])
+    return None
+
+
+def create_app(db_path: str | Path | None = None) -> Flask:
     app = Flask(
         __name__,
         template_folder=str(_WEB_DIR / "templates"),
         static_folder=str(_WEB_DIR / "static"),
     )
+    app.config["NS_DB"] = str(db_path or store.DEFAULT_DB)
 
     @app.get("/")
     def index() -> str:
@@ -145,7 +182,9 @@ def create_app() -> Flask:
                 cves = {p: [asdict(e) for e in es] for p, es in by_port.items()}
             except (OSError, ValueError):
                 cves = {}
-        return jsonify(build_report(scan=report, cves=cves))
+        report_dict = build_report(scan=report, cves=cves)
+        _maybe_persist(app, data, "scan", target, report_dict)
+        return jsonify(report_dict)
 
     @app.post("/api/pcap")
     def api_pcap() -> Any:
@@ -174,7 +213,50 @@ def create_app() -> Flask:
             report = discover(network, iface=data.get("iface") or None)
         except (OSError, ValueError, RuntimeError) as exc:
             return jsonify({"error": str(exc)}), 400
-        return jsonify(build_report(discovery=report))
+        report_dict = build_report(discovery=report)
+        _maybe_persist(app, data, "discovery", network, report_dict)
+        return jsonify(report_dict)
+
+    @app.get("/api/history")
+    def api_history() -> Any:
+        conn = store.connect(app.config["NS_DB"])
+        try:
+            rows = store.list_runs(
+                conn, kind=request.args.get("kind") or None,
+                target=request.args.get("target") or None)
+        finally:
+            conn.close()
+        return jsonify({"runs": [dict(r) for r in rows]})
+
+    @app.get("/api/history/<int:run_id>")
+    def api_history_run(run_id: int) -> Any:
+        conn = store.connect(app.config["NS_DB"])
+        try:
+            report = store.get_run(conn, run_id)
+        finally:
+            conn.close()
+        if report is None:
+            return jsonify({"error": "run not found"}), 404
+        return jsonify(report)
+
+    @app.get("/api/history/<int:run_id>/diff")
+    def api_history_diff(run_id: int) -> Any:
+        conn = store.connect(app.config["NS_DB"])
+        try:
+            report = store.get_run(conn, run_id)
+            if report is None:
+                return jsonify({"error": "run not found"}), 404
+            identity = _run_identity(report)
+            if identity is None:
+                return jsonify({"diff": None})
+            kind, target = identity
+            prev = store.previous_run(conn, kind, target, before_id=run_id)
+        finally:
+            conn.close()
+        if prev is None:
+            return jsonify({"diff": None})
+        delta = diff_run(kind, prev, report)
+        return jsonify({"diff": to_dict(delta) if delta is not None else None})
 
     @app.post("/api/capture/start")
     def api_capture_start() -> Any:
@@ -256,6 +338,8 @@ def run(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--db", default=str(store.DEFAULT_DB), metavar="PATH",
+                        help="history DB path (default: ~/.netsleuth/history.db)")
     args = parser.parse_args(argv)
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):
@@ -264,7 +348,7 @@ def run(argv: list[str] | None = None) -> int:
             "and captures and must not be network-exposed"
         )
 
-    app = create_app()
+    app = create_app(db_path=args.db)
     print(f"NetSleuth dashboard → http://{args.host}:{args.port}  (Ctrl-C to stop)")
     app.run(host=args.host, port=args.port, threaded=True, debug=args.debug)
     return 0

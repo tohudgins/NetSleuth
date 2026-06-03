@@ -197,10 +197,40 @@ function trafficCards(traffic) {
     donutChart(traffic.by_proto) + talkersCard(traffic.by_ip);
 }
 
+// "What changed since last run" card, for scan + discovery diffs.
+function diffCard(diff) {
+  if (!diff) return "";
+  if (diff.empty)
+    return `<div class="card full"><h3>Changes since last run</h3><span class="badge ok">no changes</span></div>`;
+  const d = (cls, label, rest) => `<div class="delta"><span class="${cls}">${label}</span> ${rest}</div>`;
+  let rows = "";
+  if (diff.kind === "scan") {
+    rows += diff.ports_opened.map((p) => d("add", "+ opened", `port ${p}`)).join("");
+    rows += diff.ports_closed.map((p) => d("del", "− closed", `port ${p}`)).join("");
+    rows += diff.service_changed.map((c) =>
+      d("chg", "~ service", `port ${c.port}: ${esc(c.from || "—")} → ${esc(c.to || "—")}`)).join("");
+    rows += diff.banner_changed.map((p) => d("chg", "~ banner", `port ${p} changed`)).join("");
+    if (diff.os_changed)
+      rows += d("chg", "~ OS guess", `${esc(diff.os_changed.from || "—")} → ${esc(diff.os_changed.to || "—")}`);
+  } else {
+    rows += diff.hosts_added.map((h) =>
+      d("add", "+ host", esc(h.ip) + (h.mac ? ` (${esc(h.mac)})` : ""))).join("");
+    rows += diff.hosts_removed.map((h) => d("del", "− host", esc(h.ip))).join("");
+    rows += diff.mac_changed.map((c) =>
+      d("crit", "! MAC changed", `${esc(c.ip)}: ${esc(c.from)} → ${esc(c.to)} (possible spoofing)`)).join("");
+    rows += diff.vendor_changed.map((c) =>
+      d("chg", "~ vendor", `${esc(c.ip)}: ${esc(c.from || "—")} → ${esc(c.to || "—")}`)).join("");
+    rows += diff.ports_changed.map((c) =>
+      d("chg", "~ ports", `${esc(c.ip)}: ${esc((c.from || []).join(", ") || "—")} → ${esc((c.to || []).join(", ") || "—")}`)).join("");
+  }
+  return `<div class="card full"><h3>Changes since last run</h3>${rows}</div>`;
+}
+
 // Render a full /report-shaped object into a container (scan/pcap tabs).
 function renderReport(container, report) {
   if (report.error) { container.innerHTML = `<div class="card error">${esc(report.error)}</div>`; return; }
   container.innerHTML =
+    diffCard(report.diff) +
     scanCard(report.scan) +
     discoveryCard(report.discovery) +
     trafficCards(report.traffic) +
@@ -219,6 +249,7 @@ document.getElementById("scan-form").addEventListener("submit", async (e) => {
     const { data } = await postJSON("/api/scan", {
       target: f.target.value, ports: f.ports.value,
       udp: f.udp.checked, connect: f.connect.checked, cve: f.cve.checked,
+      save: f.save.checked, diff: f.save.checked,
     });
     renderReport(out, data);
   } catch (err) {
@@ -235,6 +266,7 @@ document.getElementById("discover-form").addEventListener("submit", async (e) =>
   try {
     const { data } = await postJSON("/api/discover", {
       network: f.network.value, iface: f.iface.value,
+      save: f.save.checked, diff: f.save.checked,
     });
     renderReport(out, data);
   } catch (err) {
@@ -351,6 +383,50 @@ function closeDetail() {
   document.querySelectorAll(".packets .ln.sel").forEach((el) => el.classList.remove("sel"));
 }
 
+// --- history ---------------------------------------------------------------
+const historyList = document.getElementById("history-list");
+const historyDetail = document.getElementById("history-detail");
+
+async function loadHistory() {
+  historyDetail.innerHTML = "";
+  let runs;
+  try {
+    runs = (await (await fetch("/api/history")).json()).runs;
+  } catch (err) {
+    historyList.innerHTML = `<div class="card error">${esc(err)}</div>`; return;
+  }
+  if (!runs.length) {
+    historyList.innerHTML = `<div class="card full"><span class="muted">no saved runs yet — tick “Save to history” on a scan or discovery.</span></div>`;
+    return;
+  }
+  const rows = runs.map((r) =>
+    `<tr class="hist-row" data-id="${r.id}">
+      <td class="num">${r.id}</td><td class="mono">${esc(r.created_at)}</td>
+      <td>${esc(r.kind)}</td><td class="mono">${esc(r.target)}</td></tr>`).join("");
+  historyList.innerHTML = `<div class="card full"><h3>Saved runs</h3>
+    <table data-sortable><thead><tr>
+      <th class="sortable num" data-type="num">ID</th><th class="sortable">When (UTC)</th>
+      <th class="sortable">Kind</th><th class="sortable">Target</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>`;
+  activateTables(historyList);
+  historyList.querySelectorAll(".hist-row").forEach((tr) =>
+    tr.addEventListener("click", () => showRun(tr.dataset.id)));
+}
+
+async function showRun(id) {
+  historyDetail.innerHTML = `<div class="card full muted">loading…</div>`;
+  try {
+    const report = await (await fetch("/api/history/" + id)).json();
+    const { diff } = await (await fetch("/api/history/" + id + "/diff")).json();
+    report.diff = diff;  // renderReport shows the diff card first
+    renderReport(historyDetail, report);
+  } catch (err) {
+    historyDetail.innerHTML = `<div class="card error">${esc(err)}</div>`;
+  }
+}
+
+document.getElementById("history-refresh").addEventListener("click", loadHistory);
+
 // --- tabs (wired last so the handlers above already exist) ----------------
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -358,5 +434,6 @@ document.querySelectorAll(".tab").forEach((btn) => {
     document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
     btn.classList.add("active");
     document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+    if (btn.dataset.tab === "history") loadHistory();
   });
 });
