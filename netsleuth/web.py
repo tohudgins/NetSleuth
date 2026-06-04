@@ -220,12 +220,13 @@ def create_app(
         target = str(data.get("target") or "127.0.0.1")
         ports = _parse_ports(str(data.get("ports") or "1-1024"))
         proto = Protocol.UDP if data.get("udp") else Protocol.TCP
-        timing = data.get("timing")
-        if timing not in (None, ""):
-            workers, timeout, delay = TIMING_TEMPLATES.get(
-                int(str(timing)), (100, 1.0, 0.0))
-        else:
-            workers, timeout, delay = 100, float(data.get("timeout") or 1.0), 0.0
+        workers, timeout, delay = 100, float(data.get("timeout") or 1.0), 0.0
+        try:  # timing template overrides workers/timeout/delay when set
+            if data.get("timing") not in (None, ""):
+                workers, timeout, delay = TIMING_TEMPLATES.get(
+                    int(str(data.get("timing"))), (workers, timeout, delay))
+        except (TypeError, ValueError):
+            pass  # ignore a malformed timing value, keep defaults
         report = scan(
             target, ports, proto=proto, timeout=timeout,
             max_workers=workers, delay=delay,

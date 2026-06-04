@@ -58,3 +58,10 @@ def test_enrich_noop_without_geoip(monkeypatch):
 
 def test_enrich_noop_without_db():
     assert enrich(["8.8.8.8"]) == {}  # no DB paths given
+
+
+def test_enrich_degrades_when_reader_fails(monkeypatch):
+    # geoip2 "available" but opening the DB fails (here it isn't importable, so
+    # Reader() raises inside enrich) — must degrade to {}, never propagate.
+    monkeypatch.setattr(geoip, "_GEOIP_AVAILABLE", True)
+    assert enrich(["8.8.8.8"], city_db="/no/such/file.mmdb") == {}

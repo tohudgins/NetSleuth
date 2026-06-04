@@ -86,9 +86,15 @@ def enrich(
     """
     if not _GEOIP_AVAILABLE or not (city_db or asn_db):
         return {}
-    city_reader = geoip2.database.Reader(str(city_db)) if city_db else None
-    asn_reader = geoip2.database.Reader(str(asn_db)) if asn_db else None
+    city_reader = asn_reader = None
     try:
+        # Reader() construction is inside the try: a missing/corrupt .mmdb raises
+        # (FileNotFoundError or maxminddb.InvalidDatabaseError) and must degrade,
+        # never crash the scan/capture that asked for enrichment.
+        if city_db:
+            city_reader = geoip2.database.Reader(str(city_db))
+        if asn_db:
+            asn_reader = geoip2.database.Reader(str(asn_db))
         out: dict[str, GeoInfo] = {}
         for ip in ips:
             info = lookup(ip, city_reader=city_reader, asn_reader=asn_reader)
@@ -96,8 +102,8 @@ def enrich(
                 out[ip] = info
         logger.debug("geoip: enriched %d/%d IPs", len(out), len(ips))
         return out
-    except (OSError, ValueError) as exc:  # bad DB file
-        logger.warning("geoip: lookup failed (%s)", exc)
+    except Exception as exc:  # bad/missing DB — best-effort, never fatal
+        logger.warning("geoip: disabled (%s)", exc)
         return {}
     finally:
         if city_reader is not None:
