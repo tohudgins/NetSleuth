@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import argparse
 
+import pytest
+
 from netsleuth import cli
+from netsleuth.analyzer import AnalysisConfig, load_config
 from netsleuth.discovery import DiscoveryReport, Host
 
 
@@ -122,6 +125,52 @@ def test_timing_explicit_flags_override_template():
 def test_timing_default_when_unset():
     args = cli.build_parser().parse_args(["127.0.0.1"])
     assert cli._timing(args) == (100, 1.0, 0.0)
+
+
+# --- verbose + --config ---------------------------------------------------- #
+
+def test_parser_accepts_verbose_and_config():
+    args = cli.build_parser().parse_args(
+        ["127.0.0.1", "-vv", "--config", "c.json", "--geoip-db", "g.mmdb"])
+    assert args.verbose == 2
+    assert args.config == "c.json"
+    assert args.geoip_db == "g.mmdb"
+
+
+def test_load_config_applies_known_ignores_unknown(tmp_path):
+    p = tmp_path / "cfg.json"
+    p.write_text('{"syn_flood_count": 5, "made_up": 99}')
+    cfg = load_config(p)
+    assert cfg.syn_flood_count == 5             # known applied
+    assert cfg.icmp_flood_count == 100          # default preserved
+    assert not hasattr(cfg, "made_up")          # unknown ignored
+
+
+def test_load_config_rejects_non_object(tmp_path):
+    p = tmp_path / "bad.json"
+    p.write_text("[1, 2, 3]")
+    with pytest.raises(ValueError):
+        load_config(p)
+
+
+def test_analysis_config_uses_stashed_config():
+    args = argparse.Namespace(config="x", window=None,
+                              _config=AnalysisConfig(syn_flood_count=7))
+    cfg = cli._analysis_config(args)
+    assert cfg is not None and cfg.syn_flood_count == 7
+
+
+def test_analysis_config_window_overrides_stashed():
+    args = argparse.Namespace(config="x", window=3.0,
+                              _config=AnalysisConfig(syn_flood_count=7))
+    cfg = cli._analysis_config(args)
+    assert cfg.window == 3.0 and cfg.syn_flood_count == 7
+
+
+def test_geoip_helper_noop_without_flags():
+    from netsleuth.sniffer import TrafficStats
+    args = argparse.Namespace(geoip_db=None, geoip_asn=None)
+    assert cli._geoip(args, TrafficStats()) == {}
 
 
 def test_analysis_config_only_when_window_set():

@@ -79,11 +79,40 @@ implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
 ```bash
 pip install -e .
 # or: pip install -r requirements.txt
+pip install -e ".[geoip]"   # optional: GeoIP/ASN enrichment (you supply the DB)
 ```
 
 Requires Python 3.10+. Live SYN scan and packet capture need root (Linux/macOS)
 or Administrator (Windows); everything else, including PCAP analysis, runs
 unprivileged.
+
+### Docker
+
+```bash
+docker build -t netsleuth .
+docker run --rm netsleuth 127.0.0.1 -p 1-1024 --connect    # CLI scan
+# raw sockets (SYN scan / live capture):
+docker run --rm --cap-add=NET_RAW --cap-add=NET_ADMIN netsleuth <target> --sniff
+# web UI — loopback-only by design, so use the host network, then browse :8765:
+docker run --rm --network host --entrypoint netsleuth-web netsleuth
+```
+
+### Diagnostics & tuning
+
+`-v`/`-vv` turn on INFO/DEBUG logging. `--config thresholds.json` overrides any
+[`AnalysisConfig`](netsleuth/analyzer.py) field (e.g. `{"syn_flood_count": 200,
+"window": 5}`) — handy for tuning detection per environment without code changes.
+
+With a MaxMind **GeoLite2** database (you provide it; licensed, can't be bundled),
+external talkers in a capture get country + ASN/org columns:
+
+```bash
+python main.py --pcap capture.pcap --geoip-db GeoLite2-City.mmdb --geoip-asn GeoLite2-ASN.mmdb
+netsleuth-web --geoip-db GeoLite2-City.mmdb     # same, in the dashboard
+```
+
+Private/loopback addresses are skipped, and everything degrades to nothing when
+the DB or `geoip2` package is absent.
 
 ## Web dashboard
 
@@ -442,6 +471,8 @@ ruff check . && mypy netsleuth main.py && pytest -q
       live processing that removes the per-tick O(n²) re-scan
 - [x] Phase 9 — Polish: CPE-based CVE matching + on-disk cache, IPv6 discovery
       (NDP), web Host/Origin hardening, nmap-style scan timing templates (`-T0..5`)
+- [x] Phase 10 — Ergonomics & packaging: `-v/--verbose` logging, `--config`
+      thresholds, opt-in GeoIP/ASN enrichment, Dockerfile, and a recordable demo script
 
 ## Limitations & future work
 
@@ -464,4 +495,6 @@ ruff check . && mypy netsleuth main.py && pytest -q
   remain future work.
 - CVE matching is keyword-based against NVD; CPE-accurate matching would be more
   precise.
-- Nice-to-have: a recorded `docs/demo.gif` of the dashboard catching an attack.
+- Nice-to-have: a recorded `docs/demo.gif`. [`docs/demo.sh`](docs/demo.sh) is a
+  one-command, offline walkthrough (sample attacks → detection → history diff)
+  ready to record with `asciinema`/`agg`, `vhs`, or any screen recorder.

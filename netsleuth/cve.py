@@ -12,6 +12,7 @@ Honesty note: version parsing is best-effort and a keyword CVE search returns
 from __future__ import annotations
 
 import json
+import logging
 import re
 import urllib.parse
 import urllib.request
@@ -22,6 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from .scanner import PortState, ScanReport
+
+logger = logging.getLogger(__name__)
 
 _NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
@@ -168,7 +171,9 @@ def lookup_cves(
         cache = _cache_load(Path(cache_path))
         hit = _cache_get(cache, key, ttl)
         if hit is not None:
+            logger.debug("cve %s/%s: cache hit (%s)", sv.product, sv.version, match)
             return hit
+    logger.debug("cve %s/%s: %s query → NVD", sv.product, sv.version, match)
 
     data = fetch(url)
     entries: list[CVEEntry] = []

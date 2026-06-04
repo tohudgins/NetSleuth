@@ -12,6 +12,7 @@ and degrade gracefully rather than crashing (rule #4).
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import warnings
@@ -20,6 +21,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .privileges import can_raw_socket
+
+logger = logging.getLogger(__name__)
 
 try:
     from scapy.all import ARP, DNS, ICMP, IP, IPv6, TCP, UDP, sniff
@@ -267,8 +270,10 @@ class Sniffer:
             target=self._run, name="netsleuth-sniffer", daemon=True
         )
         self._thread.start()
+        logger.info("capture started: iface=%s filter=%s", self.iface, self.bpf_filter)
 
     def stop(self, timeout: float = 2.0) -> None:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
+        logger.info("capture stopped: %d packets", self.stats.packets)

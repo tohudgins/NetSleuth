@@ -17,6 +17,7 @@ asyncio). The OS guess is a *family heuristic* only, never called "detection"
 
 from __future__ import annotations
 
+import logging
 import socket
 import ssl
 import time
@@ -27,6 +28,8 @@ from enum import Enum
 from typing import Any
 
 from .privileges import can_raw_socket
+
+logger = logging.getLogger(__name__)
 
 # nmap-style timing templates: T -> (max_workers, per-port timeout, inter-probe
 # delay). Lower = stealthier/politer (fewer workers, longer waits, spaced
@@ -295,6 +298,8 @@ def scan(
         probe = _syn_probe if use_raw else _connect_probe
         scan_type = "syn" if use_raw else "connect"
 
+    logger.debug("scan %s: %d ports, type=%s, workers=%d, timeout=%.2fs, delay=%.2fs",
+                 target, len(ports), scan_type, max_workers, timeout, delay)
     results: list[PortResult] = []
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures: dict[Any, int] = {}

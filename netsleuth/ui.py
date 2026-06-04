@@ -118,8 +118,14 @@ def print_packet(summary: PacketSummary) -> None:
     )
 
 
-def render_traffic_table(stats: TrafficStats, top: int = 10) -> Table:
-    """Build a rich Table of the top talkers by volume (returned for testing)."""
+def render_traffic_table(
+    stats: TrafficStats, top: int = 10, *, geo: dict | None = None
+) -> Table:
+    """Build a rich Table of the top talkers by volume (returned for testing).
+
+    When ``geo`` (ip → GeoInfo) is non-empty, add Country/ASN columns for the
+    public IPs that resolved.
+    """
     protos = ", ".join(
         f"{proto}:{count}"
         for proto, count in sorted(stats.by_proto.items(), key=lambda kv: -kv[1])
@@ -131,8 +137,18 @@ def render_traffic_table(stats: TrafficStats, top: int = 10) -> Table:
     table.add_column("Source IP")
     table.add_column("Packets", justify="right")
     table.add_column("Bytes", justify="right")
+    show_geo = bool(geo)
+    if show_geo:
+        table.add_column("Country")
+        table.add_column("ASN / Org")
     for ip, counter in stats.top(top):
-        table.add_row(ip, str(counter.packets), str(counter.bytes))
+        row = [ip, str(counter.packets), str(counter.bytes)]
+        if show_geo:
+            info = (geo or {}).get(ip)
+            country = (info.country or "—") if info else "—"
+            org = f"{info.asn or ''} {info.org or ''}".strip() if info else "—"
+            row += [country, escape(org or "—")]
+        table.add_row(*row)
     return table
 
 

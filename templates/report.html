@@ -123,11 +123,14 @@
         {% endfor %}
       </div>
       {% endif %}
+      {% set has_geo = traffic.by_ip | selectattr('country', 'defined') | list | length > 0 %}
       <table style="margin-top:12px">
-        <thead><tr><th>Source IP</th><th class="num">Packets</th><th class="num">Bytes</th></tr></thead>
+        <thead><tr><th>Source IP</th><th class="num">Packets</th><th class="num">Bytes</th>
+          {% if has_geo %}<th>Country</th><th>ASN / Org</th>{% endif %}</tr></thead>
         <tbody>
           {% for row in traffic.by_ip %}
-          <tr><td class="mono">{{ row.ip }}</td><td class="num">{{ row.packets }}</td><td class="num">{{ row.bytes }}</td></tr>
+          <tr><td class="mono">{{ row.ip }}</td><td class="num">{{ row.packets }}</td><td class="num">{{ row.bytes }}</td>
+            {% if has_geo %}<td>{{ row.country or "—" }}</td><td class="small">{{ [row.asn, row.org] | select | join(" ") or "—" }}</td>{% endif %}</tr>
           {% endfor %}
         </tbody>
       </table>

@@ -27,11 +27,14 @@ from __future__ import annotations
 
 import errno
 import ipaddress
+import logging
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from .privileges import can_raw_socket
+
+logger = logging.getLogger(__name__)
 
 try:
     from scapy.all import ARP, ICMPv6EchoRequest, IPv6, Ether, conf as scapy_conf, srp
@@ -309,6 +312,8 @@ def discover(
     returns an empty result tagged ``ndp-needs-root``. Set ``force_tcp=True`` to
     force the connect-based sweep even when privileged (tests / comparison).
     """
+    logger.debug("discover %s: ipv6=%s privileged=%s force_tcp=%s",
+                 network, _is_ipv6(network), discovery_available(), force_tcp)
     if _is_ipv6(network):
         if discovery_available() and not force_tcp:
             hosts = ndp_sweep(iface=iface, timeout=timeout or 3.0)

@@ -21,6 +21,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from .analyzer import AnomalyFlag
 from .defense import DefenseAlert
 from .discovery import DiscoveryReport
+from .geoip import GeoInfo
 from .scanner import ScanReport
 from .sniffer import TrafficStats
 
@@ -35,6 +36,7 @@ def build_report(
     discovery: DiscoveryReport | None = None,
     defense: list[DefenseAlert] | None = None,
     diff: dict[str, Any] | None = None,
+    geo: dict[str, GeoInfo] | None = None,
 ) -> dict[str, Any]:
     """Assemble the unified, JSON-serialisable report structure.
 
@@ -71,15 +73,23 @@ def build_report(
         }
 
     if stats is not None:
+        geo = geo or {}
+
+        def _ip_row(ip: str, c: Any) -> dict[str, Any]:
+            row = {"ip": ip, "packets": c.packets, "bytes": c.bytes}
+            info = geo.get(ip)
+            if info is not None:  # public IP with a GeoIP hit
+                row["country"] = info.country
+                row["asn"] = info.asn
+                row["org"] = info.org
+            return row
+
         report["traffic"] = {
             "packets": stats.packets,
             "bytes": stats.bytes,
             "by_proto": dict(sorted(stats.by_proto.items(),
                                     key=lambda kv: kv[1], reverse=True)),
-            "by_ip": [
-                {"ip": ip, "packets": c.packets, "bytes": c.bytes}
-                for ip, c in stats.top(50)
-            ],
+            "by_ip": [_ip_row(ip, c) for ip, c in stats.top(50)],
         }
 
     if anomalies is not None:

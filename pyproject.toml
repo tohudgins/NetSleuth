@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "ruff", "mypy"]
+geoip = ["geoip2>=4"]
 
 [project.scripts]
 netsleuth = "netsleuth.cli:main"
@@ -52,3 +53,8 @@ warn_unused_ignores = true
 module = "scapy.*"
 ignore_missing_imports = true
 follow_imports = "skip"
+
+# geoip2 is an optional dependency (the GeoIP extra) and may not be installed.
+[[tool.mypy.overrides]]
+module = "geoip2.*"
+ignore_missing_imports = true

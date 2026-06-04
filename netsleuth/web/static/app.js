@@ -130,15 +130,22 @@ function alertsCard(title, items, emptyMsg) {
 
 function talkersCard(byIp) {
   if (!byIp || !byIp.length) return "";
-  const rows = byIp.map((r) =>
-    `<tr><td class="mono">${esc(r.ip)}</td>
+  const hasGeo = byIp.some((r) => r.country || r.asn);
+  const rows = byIp.map((r) => {
+    const geo = hasGeo
+      ? `<td>${esc(r.country || "—")}</td><td class="small">${esc([r.asn, r.org].filter(Boolean).join(" ") || "—")}</td>`
+      : "";
+    return `<tr><td class="mono">${esc(r.ip)}</td>
       <td class="num" data-sort="${r.packets}">${r.packets}</td>
-      <td class="num" data-sort="${r.bytes}">${bytesHuman(r.bytes)}</td></tr>`).join("");
+      <td class="num" data-sort="${r.bytes}">${bytesHuman(r.bytes)}</td>${geo}</tr>`;
+  }).join("");
+  const geoHead = hasGeo
+    ? `<th class="sortable">Country</th><th class="sortable">ASN / Org</th>` : "";
   return `<div class="card"><h3>Top talkers</h3>
     <table data-sortable><thead><tr>
       <th class="sortable">Source IP</th>
       <th class="sortable num" data-type="num">Pkts</th>
-      <th class="sortable num" data-type="num">Bytes</th>
+      <th class="sortable num" data-type="num">Bytes</th>${geoHead}
     </tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 

@@ -11,20 +11,24 @@ anomaly analysis and JSON/HTML reporting.
 from __future__ import annotations
 
 import argparse
+import logging
 import time
 from dataclasses import asdict
 from typing import Any
 
 from rich.live import Live
+from rich.logging import RichHandler
 
-from netsleuth import store, ui
+from netsleuth import geoip, store, ui
 from netsleuth.alerts import emit_alerts
+from netsleuth.geoip import GeoInfo
 from netsleuth.analyzer import (
     AnalysisConfig,
     AnomalyFlag,
     WindowAnalyzer,
     analyze,
     analyze_stream,
+    load_config,
 )
 from netsleuth.cve import DEFAULT_CVE_CACHE, enrich_scan
 from netsleuth.defense import DefenseAlert, DefenseConfig, detect_spoofing
@@ -87,6 +91,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="force unprivileged connect scan even if privileged")
     p.add_argument("--show-closed", action="store_true",
                    help="list closed/filtered ports too (default: only open)")
+    p.add_argument("-v", "--verbose", action="count", default=0,
+                   help="verbose diagnostics: -v INFO, -vv DEBUG")
 
     sniff_grp = p.add_argument_group("sniffer (needs root/Administrator)")
     sniff_grp.add_argument("--sniff", action="store_true",
@@ -114,6 +120,14 @@ def build_parser() -> argparse.ArgumentParser:
                           "scans + flood rates) instead of whole-capture counting")
     intg_grp.add_argument("--window", type=float, default=None, metavar="SECONDS",
                           help="streaming window size for rate detection (default: 10)")
+    intg_grp.add_argument("--config", default=None, metavar="FILE",
+                          help="JSON file of analyzer thresholds (AnalysisConfig fields)")
+    intg_grp.add_argument("--geoip-db", default=None, metavar="FILE",
+                          help="MaxMind GeoLite2-City .mmdb — adds country to "
+                          "external talkers (needs `pip install geoip2`)")
+    intg_grp.add_argument("--geoip-asn", default=None, metavar="FILE",
+                          help="MaxMind GeoLite2-ASN .mmdb — adds ASN/org to "
+                          "external talkers")
     intg_grp.add_argument("--report-dir", default=None,
                           help="write JSON + HTML report into this directory")
     intg_grp.add_argument("--cve", action="store_true",
@@ -151,6 +165,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 # --- shared helpers -------------------------------------------------------- #
+
+def _setup_logging(verbosity: int) -> None:
+    """Configure the `netsleuth` logger; quiet (WARNING) unless -v/-vv given."""
+    level = {0: logging.WARNING, 1: logging.INFO}.get(verbosity, logging.DEBUG)
+    logger = logging.getLogger("netsleuth")
+    logger.setLevel(level)
+    if not logger.handlers:
+        handler = RichHandler(console=ui.console, show_path=False,
+                              show_time=False, rich_tracebacks=True)
+        handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+        logger.addHandler(handler)
+
 
 def _timing(args: argparse.Namespace) -> tuple[int, float, float]:
     """Resolve (workers, timeout, delay) from a -T template + explicit overrides.
@@ -190,13 +216,14 @@ def _write_reports(
     cves: dict[int, list[dict[str, Any]]] | None = None,
     discovery: DiscoveryReport | None = None,
     defense: list[DefenseAlert] | None = None,
+    geo: dict[str, GeoInfo] | None = None,
     default_dir: str | None = None,
 ) -> None:
     out = args.report_dir or default_dir
     if not out:
         return
     report = build_report(scan=scan_report, stats=stats, anomalies=anomalies,
-                          cves=cves, discovery=discovery, defense=defense)
+                          cves=cves, discovery=discovery, defense=defense, geo=geo)
     paths = write_report(out, report)
     ui.console.print(
         f"Reports written: {paths['json']} and {paths['html']}", style="green"
@@ -244,11 +271,27 @@ def _persist_and_diff(
     return delta
 
 
+def _geoip(args: argparse.Namespace, stats: TrafficStats) -> dict[str, GeoInfo]:
+    """Enrich the top talkers with country/ASN when a GeoIP DB was supplied."""
+    if not (args.geoip_db or args.geoip_asn):
+        return {}
+    ips = [ip for ip, _ in stats.top(50)]
+    return geoip.enrich(ips, city_db=args.geoip_db, asn_db=args.geoip_asn)
+
+
 def _analysis_config(args: argparse.Namespace) -> AnalysisConfig | None:
-    """Build an AnalysisConfig only when a streaming knob was overridden."""
+    """Resolve an AnalysisConfig from --config and/or --window (None if neither).
+
+    The --config file is loaded once in ``main`` and stashed on ``args._config``;
+    here we just apply the --window override on top.
+    """
+    cfg = getattr(args, "_config", None)
+    if cfg is None and not getattr(args, "window", None):
+        return None
+    cfg = cfg if cfg is not None else AnalysisConfig()
     if getattr(args, "window", None):
-        return AnalysisConfig(window=args.window)
-    return None
+        cfg.window = args.window
+    return cfg
 
 
 def _warn_history_ignored(args: argparse.Namespace) -> None:
@@ -476,11 +519,13 @@ def run_sniff(args: argparse.Namespace) -> int:
     # A finished live capture → windowed/rate verdict (time-aware).
     anomalies = analyze_stream(packets, _analysis_config(args), known_hosts=known)
     spoofing = detect_spoofing(packets, baseline=baseline, config=defense_cfg)
-    ui.console.print(ui.render_traffic_table(sniffer.stats))
+    geo = _geoip(args, sniffer.stats)
+    ui.console.print(ui.render_traffic_table(sniffer.stats, geo=geo))
     ui.console.print(ui.render_defense(spoofing))
     ui.console.print(ui.render_anomalies(anomalies))
     _forward_alerts(args, anomalies, spoofing)
-    _write_reports(args, stats=sniffer.stats, anomalies=anomalies, defense=spoofing)
+    _write_reports(args, stats=sniffer.stats, anomalies=anomalies, defense=spoofing,
+                   geo=geo)
     return 0
 
 
@@ -499,12 +544,13 @@ def run_pcap(args: argparse.Namespace) -> int:
     detect = analyze_stream if args.stream else analyze
     anomalies = detect(result.packets, cfg,
                        known_hosts=_known_hosts(args, allow_auto=False))
-    ui.console.print(ui.render_traffic_table(result.stats))
+    geo = _geoip(args, result.stats)
+    ui.console.print(ui.render_traffic_table(result.stats, geo=geo))
     ui.console.print(ui.render_defense(spoofing))
     ui.console.print(ui.render_anomalies(anomalies))
     _forward_alerts(args, anomalies, spoofing)
     _write_reports(args, stats=result.stats, anomalies=anomalies,
-                   defense=spoofing)
+                   defense=spoofing, geo=geo)
     return 0
 
 
@@ -579,12 +625,21 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
     _forward_alerts(args, anomalies, spoofing)
     _write_reports(args, scan_report=report, stats=sniffer.stats,
                    anomalies=anomalies, cves=cves, defense=spoofing,
-                   default_dir="reports")
+                   geo=_geoip(args, sniffer.stats), default_dir="reports")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _setup_logging(args.verbose)
+
+    args._config = None  # loaded once here; _analysis_config reuses it
+    if args.config:
+        try:
+            args._config = load_config(args.config)
+        except (OSError, ValueError) as exc:
+            ui.console.print(f"Bad --config: {exc}", style="bold red")
+            return 2
 
     # History listing is an offline DB read — no target, no privileges.
     if args.history:

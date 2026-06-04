@@ -29,7 +29,7 @@ from urllib.parse import urlparse
 
 from flask import Flask, Response, jsonify, render_template, request
 
-from . import store
+from . import geoip, store
 from .analyzer import AnomalyFlag, WindowAnalyzer, analyze_stream
 from .cli import _parse_ports
 from .cve import DEFAULT_CVE_CACHE, enrich_scan
@@ -178,13 +178,27 @@ def _run_identity(report: dict[str, Any]) -> tuple[str, str] | None:
     return None
 
 
-def create_app(db_path: str | Path | None = None) -> Flask:
+def _geo_for(app: Flask, stats: Any) -> dict[str, geoip.GeoInfo]:
+    """Enrich a stats object's top talkers via the app's configured GeoIP DBs."""
+    city, asn = app.config.get("NS_GEOIP", (None, None))
+    if not (city or asn):
+        return {}
+    return geoip.enrich([ip for ip, _ in stats.top(50)], city_db=city, asn_db=asn)
+
+
+def create_app(
+    db_path: str | Path | None = None,
+    *,
+    geoip_db: str | None = None,
+    geoip_asn: str | None = None,
+) -> Flask:
     app = Flask(
         __name__,
         template_folder=str(_WEB_DIR / "templates"),
         static_folder=str(_WEB_DIR / "static"),
     )
     app.config["NS_DB"] = str(db_path or store.DEFAULT_DB)
+    app.config["NS_GEOIP"] = (geoip_db, geoip_asn)
 
     @app.before_request
     def _guard_loopback() -> Any:
@@ -246,6 +260,7 @@ def create_app(db_path: str | Path | None = None) -> Flask:
         return jsonify(build_report(
             stats=result.stats, anomalies=result.anomalies,
             defense=detect_spoofing(result.packets),
+            geo=_geo_for(app, result.stats),
         ))
 
     @app.post("/api/discover")
@@ -370,6 +385,7 @@ def create_app(db_path: str | Path | None = None) -> Flask:
                 anomalies=analyze_stream(packets),  # complete windowed verdict
                 defense=detect_spoofing(packets, baseline=_live_baseline,
                                         config=_live_defense_cfg),
+                geo=_geo_for(app, _sniffer.stats),
             )
         return jsonify(payload)
 
@@ -387,6 +403,10 @@ def run(argv: list[str] | None = None) -> int:
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--db", default=str(store.DEFAULT_DB), metavar="PATH",
                         help="history DB path (default: ~/.netsleuth/history.db)")
+    parser.add_argument("--geoip-db", default=None, metavar="PATH",
+                        help="MaxMind GeoLite2-City .mmdb for talker geolocation")
+    parser.add_argument("--geoip-asn", default=None, metavar="PATH",
+                        help="MaxMind GeoLite2-ASN .mmdb for talker ASN/org")
     args = parser.parse_args(argv)
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):
@@ -395,7 +415,8 @@ def run(argv: list[str] | None = None) -> int:
             "and captures and must not be network-exposed"
         )
 
-    app = create_app(db_path=args.db)
+    app = create_app(db_path=args.db, geoip_db=args.geoip_db,
+                     geoip_asn=args.geoip_asn)
     print(f"NetSleuth dashboard → http://{args.host}:{args.port}  (Ctrl-C to stop)")
     app.run(host=args.host, port=args.port, threaded=True, debug=args.debug)
     return 0

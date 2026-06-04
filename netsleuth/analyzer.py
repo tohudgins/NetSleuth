@@ -17,13 +17,18 @@ Works purely off PacketSummary fields (no scapy), so it is fully unit-testable.
 
 from __future__ import annotations
 
+import json
+import logging
 import statistics
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+from pathlib import Path
 from typing import Any
 
 from .sniffer import PacketSummary
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -54,6 +59,25 @@ class AnalysisConfig:
     slow_scan_ports: int = 20  # distinct ports/src over the long window
     beacon_window: float = 600.0  # window over which to judge a beacon cadence
     cooldown: float = 30.0  # min seconds between repeats of one (kind, key)
+
+
+def load_config(path: str | Path) -> AnalysisConfig:
+    """Load analyzer thresholds from a JSON object file.
+
+    Only keys matching real ``AnalysisConfig`` fields are applied; unknown keys
+    are warned-and-ignored. Raises on a missing file or non-object JSON.
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"config must be a JSON object: {path}")
+    known = {f.name for f in fields(AnalysisConfig)}
+    kwargs = {}
+    for key, value in data.items():
+        if key in known:
+            kwargs[key] = value
+        else:
+            logger.warning("config: ignoring unknown key %r", key)
+    return AnalysisConfig(**kwargs)
 
 
 def _is_syn_only(flags: str | None) -> bool:
