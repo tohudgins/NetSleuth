@@ -1,3 +1,7 @@
 scapy>=2.5
 rich>=13.0
 jinja2>=3.1
+flask>=3.0
+# Optional: GeoIP/ASN enrichment (--geoip-db / --geoip-asn). Needs a MaxMind
+# GeoLite2 .mmdb you supply. Install with: pip install geoip2
+# geoip2>=4
