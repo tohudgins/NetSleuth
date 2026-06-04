@@ -17,11 +17,14 @@ implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
 
 - [Highlights](#highlights)
 - [Install](#install)
+  - [Docker](#docker)
+  - [Diagnostics & tuning](#diagnostics--tuning)
 - [Web dashboard](#web-dashboard)
 - [Usage (CLI)](#usage-cli)
 - [Analyzing real-world captures (blue-team)](#analyzing-real-world-captures-blue-team)
 - [History & diff](#history--diff--what-changed-since-last-time)
 - [Alert forwarding + CVE lookup](#alert-forwarding--cve-lookup)
+- [Stealth & politeness — scan timing](#stealth--politeness--scan-timing--t05)
 - [Architecture](#architecture)
 - [Design decisions](#design-decisions)
 - [Detection heuristics — and their limits](#detection-heuristics--and-their-limits)
@@ -304,6 +307,11 @@ Because **live capture and PCAP import both produce `PacketSummary`**, the
 analyzer, traffic stats, reporter, and alert pipeline are identical for live and
 offline traffic. PCAP import is ~30 lines precisely because it reuses the
 sniffer's `summarize()`.
+
+Two **opt-in enrichers** hang off the report without the core depending on them:
+`cve.py` (NVD CVEs per open port, CPE-matched + cached) and `geoip.py`
+(country/ASN for external talkers via a user-supplied MaxMind DB). Both are
+fail-soft — absent network, key, or database, the rest of the tool is unchanged.
 
 ## Design decisions
 
