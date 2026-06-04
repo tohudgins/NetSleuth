@@ -9,4 +9,6 @@ __pycache__
 reports/
 lab/samples/
 docs/*.gif
+geoip/
+*.mmdb
 .DS_Store

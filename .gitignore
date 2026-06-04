@@ -12,3 +12,7 @@ venv/
 *.pcap
 reports/
 netsleuth-report.*
+
+# GeoIP databases — licensed + large; keep them local (pass via --geoip-db/--geoip-asn)
+geoip/
+*.mmdb
