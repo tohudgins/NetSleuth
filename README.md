@@ -447,6 +447,17 @@ The `lab/` directory gives you legal targets out of the box:
 
 See [`lab/README.md`](lab/README.md).
 
+### Learn the fundamentals with it
+
+NetSleuth reimplements what `nmap` and Wireshark do, so it doubles as a study lab
+for the packet-level networking skills security **engineer/analyst** roles screen
+for. [`docs/learning-with-netsleuth.md`](docs/learning-with-netsleuth.md) is a
+guided walkthrough: run the real tools side by side, map each feature to the
+nmap flag / Wireshark display filter it mirrors, and reproduce every detection in
+Wireshark. The automated counterpart is
+[`tests/test_nmap_parity.py`](tests/test_nmap_parity.py) — it diffs our raw-socket
+scan against real `nmap -sT -oX` and asserts they agree (skips if nmap is absent).
+
 ## Testing & quality
 
 - `ruff` + `mypy` clean, type hints throughout; CI runs on Python 3.10–3.12.
