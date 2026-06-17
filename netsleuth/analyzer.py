@@ -5,6 +5,7 @@ clearly-labeled* anomaly flags. These are coarse heuristics, NOT an IDS — they
 exist to surface obvious patterns, and we say so in every flag.
 
   * port-scan pattern  — one source hitting many distinct destination ports.
+  * stealth scan       — one source probing many ports with NULL/FIN/Xmas flags.
   * SYN flood          — many SYN-only segments toward one destination.
   * ARP spoof signs    — one IP advertising multiple MAC addresses.
   * ICMP flood         — many ICMP/ICMPv6 packets toward one destination.
@@ -43,6 +44,7 @@ class AnalysisConfig:
     # Thresholds are deliberately conservative; tune per environment.
     # --- whole/batch mode: absolute counts over the entire capture ---------- #
     port_scan_ports: int = 15  # distinct dst ports from one src
+    stealth_scan_ports: int = 6  # distinct dst ports probed with FIN/NULL/Xmas
     syn_flood_count: int = 100  # SYN-only segments toward one dst
     icmp_flood_count: int = 100  # ICMP(v6) packets toward one dst
     dns_query_count: int = 50  # DNS packets from one src
@@ -85,6 +87,33 @@ def _is_syn_only(flags: str | None) -> bool:
     return flags is not None and "S" in flags and "A" not in flags
 
 
+# Real TCP flag letters scapy emits; everything else in the string is ignored.
+_TCP_FLAG_LETTERS = set("FSRPAUEC")
+
+
+def _classify_stealth_flags(flags: str | None) -> str | None:
+    """Name the stealth-scan technique a TCP flag combo matches, else None.
+
+    These combinations are abnormal in normal traffic and characteristic of
+    half-open / firewall-evasion scans (and OS-detection probes):
+
+      * NULL  — no flags set at all.
+      * FIN   — FIN alone (a legitimate close carries ACK too, so we require
+                FIN *without* ACK).
+      * Xmas  — FIN+PSH+URG together, without SYN/ACK.
+    """
+    if flags is None:
+        return None
+    present = set(flags) & _TCP_FLAG_LETTERS
+    if not present:
+        return "NULL"
+    if present == {"F"}:
+        return "FIN"
+    if {"F", "P", "U"} <= present and not (present & {"S", "A"}):
+        return "Xmas"
+    return None
+
+
 # --- individual heuristics (each returns its own flags) -------------------- #
 
 def _detect_port_scan(packets: list[PacketSummary], cfg: AnalysisConfig) -> list[AnomalyFlag]:
@@ -99,6 +128,37 @@ def _detect_port_scan(packets: list[PacketSummary], cfg: AnalysisConfig) -> list
                 "port-scan", "warning",
                 f"{src} touched {len(ports)} distinct TCP ports "
                 f"(>= {cfg.port_scan_ports}) — possible port scan (heuristic)",
+            ))
+    return flags
+
+
+def _detect_stealth_scan(
+    packets: list[PacketSummary], cfg: AnalysisConfig
+) -> list[AnomalyFlag]:
+    """Sources probing many ports with NULL/FIN/Xmas flag combinations.
+
+    Distinct from the volume-based port-scan flag: the *flags themselves* are
+    the tell, so this catches stealth scans even at low volume and names the
+    technique(s) used.
+    """
+    ports_by_src: dict[str, set[int]] = defaultdict(set)
+    kinds_by_src: dict[str, set[str]] = defaultdict(set)
+    for p in packets:
+        if p.proto != "TCP" or p.dport is None:
+            continue
+        kind = _classify_stealth_flags(p.flags)
+        if kind is not None:
+            ports_by_src[p.src].add(p.dport)
+            kinds_by_src[p.src].add(kind)
+    flags = []
+    for src, ports in ports_by_src.items():
+        if len(ports) >= cfg.stealth_scan_ports:
+            techniques = "/".join(sorted(kinds_by_src[src]))
+            flags.append(AnomalyFlag(
+                "stealth-scan", "warning",
+                f"{src} probed {len(ports)} distinct ports with {techniques} "
+                f"packets (>= {cfg.stealth_scan_ports}) — possible stealth scan "
+                "/ firewall evasion (heuristic)",
             ))
     return flags
 
@@ -232,6 +292,7 @@ def _run_batch(
     """The whole-capture, count-based verdict (the original batch detectors)."""
     flags: list[AnomalyFlag] = []
     flags += _detect_port_scan(packets, cfg)
+    flags += _detect_stealth_scan(packets, cfg)
     flags += _detect_syn_flood(packets, cfg)
     flags += _detect_arp_spoof(packets, cfg)
     flags += _detect_icmp_flood(packets, cfg)
@@ -287,6 +348,8 @@ class WindowAnalyzer:
         # window-mode per-key event stores
         self._ports: dict[str, deque] = defaultdict(deque)       # (ts, port) fast
         self._slow: dict[str, deque] = defaultdict(deque)        # (ts, port) slow
+        self._stealth: dict[str, deque] = defaultdict(deque)     # (ts, port) FIN/NULL/Xmas
+        self._stealth_kinds: dict[str, set[str]] = defaultdict(set)
         self._syn: dict[str, deque] = defaultdict(deque)         # ts per dst
         self._icmp: dict[str, deque] = defaultdict(deque)        # ts per dst
         self._dns: dict[str, deque] = defaultdict(deque)         # (ts, len) src
@@ -368,6 +431,21 @@ class WindowAnalyzer:
                            f"{p.src} touched {slow_distinct} distinct ports over "
                            f"{cfg.slow_scan_window:.0f}s (>= {cfg.slow_scan_ports}) "
                            "— possible low-and-slow port scan (heuristic)")
+
+            stealth_kind = _classify_stealth_flags(p.flags)
+            if stealth_kind is not None:
+                self._stealth_kinds[p.src].add(stealth_kind)
+                st = self._stealth[p.src]
+                st.append((p.ts, p.dport))
+                _evict(st, now - cfg.window)
+                st_distinct = len({port for _, port in st})
+                if st_distinct >= cfg.stealth_scan_ports:
+                    techniques = "/".join(sorted(self._stealth_kinds[p.src]))
+                    self._emit(out, "stealth-scan", p.src,
+                               f"{p.src} probed {st_distinct} distinct ports with "
+                               f"{techniques} packets in {cfg.window:.0f}s "
+                               f"(>= {cfg.stealth_scan_ports}) — possible stealth "
+                               "scan / firewall evasion (heuristic)")
 
         elif p.proto in ("ICMP", "ICMPv6"):
             icmp = self._icmp[p.dst]

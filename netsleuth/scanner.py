@@ -25,6 +25,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import partial
 from typing import Any
 
 from .privileges import can_raw_socket
@@ -47,12 +48,38 @@ TIMING_TEMPLATES: dict[int, tuple[int, float, float]] = {
 # using it still counts as "doing it ourselves". Imported lazily-friendly at the
 # top; SYN/UDP raw probes are only invoked when privileged.
 try:
-    from scapy.all import ICMP, IP, TCP, UDP, conf as scapy_conf, sr1
+    from scapy.all import (
+        ICMP,
+        IP,
+        IPv6,
+        TCP,
+        UDP,
+        Raw,
+        conf as scapy_conf,
+        send,
+        sr1,
+    )
 
     scapy_conf.verb = 0  # silence scapy's own logging
     _SCAPY_AVAILABLE = True
 except Exception:  # pragma: no cover - environment dependent
     _SCAPY_AVAILABLE = False
+
+
+# --- address family (IPv4 / IPv6) ------------------------------------------ #
+
+def _is_ipv6(target: str) -> bool:
+    """A bare ':' only appears in IPv6 literals (hostnames/IPv4 never have one)."""
+    return ":" in target
+
+
+def _sock_family(target: str) -> int:
+    return socket.AF_INET6 if _is_ipv6(target) else socket.AF_INET
+
+
+def _ip_layer(target: str) -> Any:
+    """The scapy network layer matching the target's address family."""
+    return IPv6(dst=target) if _is_ipv6(target) else IP(dst=target)
 
 
 class Protocol(str, Enum):
@@ -112,6 +139,8 @@ def _grab_tls_banner(target: str, port: int, timeout: float) -> str | None:
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    # create_connection resolves IPv4/IPv6 itself, so TLS banner grabbing is
+    # address-family agnostic.
     with socket.create_connection((target, port), timeout=timeout) as raw:
         with ctx.wrap_socket(raw, server_hostname=target) as s:
             s.settimeout(timeout)
@@ -125,7 +154,7 @@ def _grab_banner(target: str, port: int, timeout: float = 1.5) -> str | None:
     try:
         if port in _HTTPS_PORTS:
             return _grab_tls_banner(target, port, timeout)
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        with socket.socket(_sock_family(target), socket.SOCK_STREAM) as s:
             s.settimeout(timeout)
             s.connect((target, port))
             if port in _HTTP_PORTS:
@@ -154,7 +183,7 @@ def _service_hint(port: int, banner: str | None) -> str | None:
 # --- TCP connect scan (unprivileged) --------------------------------------- #
 
 def _connect_probe(target: str, port: int, timeout: float) -> PortResult:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    with socket.socket(_sock_family(target), socket.SOCK_STREAM) as s:
         s.settimeout(timeout)
         result = s.connect_ex((target, port))
     if result == 0:
@@ -173,15 +202,17 @@ def _syn_probe(target: str, port: int, timeout: float) -> PortResult:
     We send a RST after a SYN-ACK to avoid completing the handshake (a polite
     half-open scan), mirroring how nmap's SYN scan behaves.
     """
-    pkt = IP(dst=target) / TCP(dport=port, flags="S")
+    pkt = _ip_layer(target) / TCP(dport=port, flags="S")
     resp = sr1(pkt, timeout=timeout)
     if resp is None:
         return PortResult(port, PortState.FILTERED, Protocol.TCP)
     if resp.haslayer(TCP):
         flags = resp[TCP].flags
         if flags == 0x12:  # SYN-ACK
-            # tear down without finishing the handshake
-            sr1(IP(dst=target) / TCP(dport=port, flags="R"), timeout=timeout)
+            # Tear down without finishing the handshake. Fire-and-forget with
+            # send(): an RST never elicits a reply, so sr1() here would just
+            # block for the full timeout on every open port.
+            send(_ip_layer(target) / TCP(dport=port, flags="R"), verbose=0)
             banner = _grab_banner(target, port)
             return PortResult(port, PortState.OPEN, Protocol.TCP, banner,
                               _service_hint(port, banner))
@@ -190,7 +221,55 @@ def _syn_probe(target: str, port: int, timeout: float) -> PortResult:
     return PortResult(port, PortState.FILTERED, Protocol.TCP)
 
 
+# --- TCP stealth scans (privileged, scapy): FIN / NULL / Xmas -------------- #
+
+# scapy flag strings for the RFC 793 stealth scans. A compliant stack answers a
+# probe with these flags only when the port is CLOSED (with an RST); an OPEN port
+# stays silent, so open and filtered are indistinguishable. Windows/many stacks
+# reply RST regardless, so these scans read everything "closed" there — a known
+# limitation we surface in the docs, not a bug.
+_STEALTH_FLAGS: dict[str, str] = {"fin": "F", "null": "", "xmas": "FPU"}
+
+
+def _flag_probe(target: str, port: int, timeout: float, *, flags: str) -> PortResult:
+    """RFC 793 stealth probe: no reply -> open|filtered; RST -> closed.
+
+    Used by the FIN/NULL/Xmas scans. Open ports don't answer, so there is no
+    banner to grab here (unlike connect/SYN).
+    """
+    resp = sr1(_ip_layer(target) / TCP(dport=port, flags=flags), timeout=timeout)
+    if resp is None:
+        return PortResult(port, PortState.OPEN_FILTERED, Protocol.TCP)
+    if resp.haslayer(TCP) and int(resp[TCP].flags) & 0x04:  # RST
+        return PortResult(port, PortState.CLOSED, Protocol.TCP)
+    if resp.haslayer(ICMP):  # ICMP unreachable -> administratively filtered
+        return PortResult(port, PortState.FILTERED, Protocol.TCP)
+    return PortResult(port, PortState.OPEN_FILTERED, Protocol.TCP)
+
+
 # --- UDP scan -------------------------------------------------------------- #
+
+# Protocol-specific UDP payloads. A real service often stays silent for a junk
+# datagram but answers a well-formed request, so a port-aware probe turns many
+# "open|filtered" guesses into a definite "open". Unknown ports fall back to a
+# single null byte. (Hand-built minimal probes, not nmap's payload DB.)
+_UDP_PAYLOADS: dict[int, bytes] = {
+    # DNS CHAOS TXT query for version.bind
+    53: b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+        b"\x07version\x04bind\x00\x00\x10\x00\x03",
+    # NTPv3 client-mode request (mode 3, 48 bytes)
+    123: b"\x1b" + 47 * b"\x00",
+    # SNMPv1 GET community "public" for sysDescr.0 (1.3.6.1.2.1.1.1.0)
+    161: bytes.fromhex(
+        "302902010004067075626c6963a01c020400000001020100"
+        "020100300e300c06082b060102010101000500"),
+}
+
+
+def _udp_payload(port: int) -> bytes:
+    """Best probe bytes for a UDP port — a real request where we have one."""
+    return _UDP_PAYLOADS.get(port, b"\x00")
+
 
 def _udp_connect_probe(target: str, port: int, timeout: float) -> PortResult:
     """Unprivileged UDP probe via a connected datagram socket.
@@ -200,10 +279,10 @@ def _udp_connect_probe(target: str, port: int, timeout: float) -> PortResult:
     can't tell without raw sockets, so we say so).
     """
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        with socket.socket(_sock_family(target), socket.SOCK_DGRAM) as s:
             s.settimeout(timeout)
             s.connect((target, port))
-            s.send(b"\x00")
+            s.send(_udp_payload(port))
             try:
                 data = s.recv(256)
             except socket.timeout:
@@ -223,11 +302,14 @@ def _udp_scapy_probe(target: str, port: int, timeout: float) -> PortResult:
     Other ICMP unreachable codes mean the port is administratively filtered;
     no reply at all is the ambiguous open|filtered case.
     """
-    resp = sr1(IP(dst=target) / UDP(dport=port), timeout=timeout)
+    pkt = _ip_layer(target) / UDP(dport=port) / Raw(load=_udp_payload(port))
+    resp = sr1(pkt, timeout=timeout)
     if resp is None:
         return PortResult(port, PortState.OPEN_FILTERED, Protocol.UDP)
     if resp.haslayer(UDP):
         return PortResult(port, PortState.OPEN, Protocol.UDP)
+    # ICMP port-unreachable => closed (IPv4); the IPv6 equivalent is ICMPv6,
+    # which we don't decode here, so IPv6 closed ports read as open|filtered.
     if resp.haslayer(ICMP):
         icmp = resp[ICMP]
         if int(icmp.type) == 3 and int(icmp.code) == 3:  # port unreachable
@@ -238,22 +320,33 @@ def _udp_scapy_probe(target: str, port: int, timeout: float) -> PortResult:
 
 # --- OS family heuristic (NOT detection) ----------------------------------- #
 
-def _family_from_ttl(ttl: int) -> str:
-    """Map an observed TTL to a coarse OS *family* guess.
+def _family_from_ttl(ttl: int, window: int | None = None) -> str:
+    """Map an observed TTL (refined by TCP window size) to a coarse OS *family*.
 
     Pure function so it can be unit-tested without scapy or a live network.
     Typical initial TTLs: ~64 Linux/Unix, ~128 Windows, ~255 network devices.
-    This is a heuristic, NOT OS fingerprinting.
+    The TCP window size is a *weak* secondary signal — a very small advertised
+    window leans toward embedded/network gear rather than a general-purpose OS —
+    so we report it as supporting evidence, never as proof. This is a heuristic,
+    NOT OS fingerprinting.
     """
     if ttl <= 64:
-        return "Linux/Unix family (TTL≈64 heuristic — best guess)"
-    if ttl <= 128:
-        return "Windows family (TTL≈128 heuristic — best guess)"
-    return "Network device / other (high TTL heuristic — best guess)"
+        family = "Linux/Unix family (TTL≈64 heuristic — best guess)"
+    elif ttl <= 128:
+        family = "Windows family (TTL≈128 heuristic — best guess)"
+    else:
+        family = "Network device / other (high TTL heuristic — best guess)"
+    if window is not None:
+        # Nudge, don't override: a tiny window is characteristic of embedded gear.
+        if 0 < window <= 1024:
+            family += f", small TCP window {window} → leans network/embedded"
+        else:
+            family += f", TCP window {window}"
+    return family
 
 
 def _os_family_guess(target: str, timeout: float = 1.5) -> str | None:
-    """Rough OS *family* guess from the TTL of one reply.
+    """Rough OS *family* guess from the TTL and TCP window of one reply.
 
     This is a coarse heuristic, NOT OS fingerprinting. Real fingerprinting needs
     dozens of probes and a signature database. We label it as a guess everywhere
@@ -261,10 +354,18 @@ def _os_family_guess(target: str, timeout: float = 1.5) -> str | None:
     """
     if not (_SCAPY_AVAILABLE and can_raw_socket()):
         return None
-    resp = sr1(IP(dst=target) / TCP(dport=80, flags="S"), timeout=timeout)
-    if resp is None or not resp.haslayer(IP):
+    resp = sr1(_ip_layer(target) / TCP(dport=80, flags="S"), timeout=timeout)
+    if resp is None:
         return None
-    return _family_from_ttl(int(resp[IP].ttl))
+    # IPv4 carries TTL; IPv6 carries an equivalent hop limit (hlim).
+    if resp.haslayer(IP):
+        hops = int(resp[IP].ttl)
+    elif resp.haslayer(IPv6):
+        hops = int(resp[IPv6].hlim)
+    else:
+        return None
+    window = int(resp[TCP].window) if resp.haslayer(TCP) else None
+    return _family_from_ttl(hops, window)
 
 
 # --- Public entry point ---------------------------------------------------- #
@@ -278,21 +379,36 @@ def scan(
     max_workers: int = 100,
     delay: float = 0.0,
     force_connect: bool = False,
+    stealth: str | None = None,
     on_result: Callable[[PortResult], None] | None = None,
 ) -> ScanReport:
     """Scan `ports` on `target`, picking the probe by protocol and privilege.
 
     Set force_connect=True to use the TCP connect scan even when privileged
-    (useful for the optional nmap-parity test). `on_result` is invoked on the
-    calling thread as each port finishes — used by the UI for a progress bar.
-    `delay` spaces out probe submissions (timing templates) — with max_workers=1
-    that yields a serial, paced scan for stealth/politeness.
+    (useful for the optional nmap-parity test). `stealth` selects an RFC 793
+    half-open technique ("fin"/"null"/"xmas"); these need raw-socket privileges
+    and silently fall back to a connect scan when unprivileged. `on_result` is
+    invoked on the calling thread as each port finishes — used by the UI for a
+    progress bar. `delay` spaces out probe submissions (timing templates) — with
+    max_workers=1 that yields a serial, paced scan for stealth/politeness.
     """
     privileged = can_raw_socket() and _SCAPY_AVAILABLE
     if proto is Protocol.UDP:
         use_raw = privileged
         probe = _udp_scapy_probe if use_raw else _udp_connect_probe
         scan_type = "udp" if use_raw else "udp-connect"
+    elif stealth in _STEALTH_FLAGS and not force_connect:
+        if privileged:
+            use_raw = True
+            probe = partial(_flag_probe, flags=_STEALTH_FLAGS[stealth])
+            scan_type = stealth  # "fin" | "null" | "xmas"
+        else:
+            # Stealth scans require raw sockets — degrade rather than crash.
+            logger.warning("stealth %s scan needs raw-socket privileges; "
+                           "falling back to a TCP connect scan", stealth)
+            use_raw = False
+            probe = _connect_probe
+            scan_type = "connect"
     else:
         use_raw = privileged and not force_connect
         probe = _syn_probe if use_raw else _connect_probe
@@ -319,6 +435,8 @@ def scan(
 
     results.sort(key=lambda r: r.port)
     report = ScanReport(target=target, scan_type=scan_type, proto=proto, ports=results)
-    if proto is Protocol.TCP and use_raw:
+    # Only the SYN scan fires the (SYN-based) OS probe — doing so during a FIN/
+    # NULL/Xmas scan would defeat its stealth.
+    if proto is Protocol.TCP and scan_type == "syn":
         report.os_family_guess = _os_family_guess(target)
     return report

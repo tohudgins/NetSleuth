@@ -5,7 +5,7 @@ Works off PacketSummary objects built in memory, so no scapy or capture needed.
 
 from __future__ import annotations
 
-from netsleuth.analyzer import AnalysisConfig, analyze
+from netsleuth.analyzer import AnalysisConfig, _classify_stealth_flags, analyze
 from netsleuth.sniffer import PacketSummary
 
 
@@ -41,6 +41,31 @@ def test_no_port_scan_below_threshold():
     pkts = [_tcp("10.0.0.5", "10.0.0.1", port) for port in range(1, 6)]
     flags = analyze(pkts, AnalysisConfig(port_scan_ports=15))
     assert all(f.kind != "port-scan" for f in flags)
+
+
+def test_classify_stealth_flags():
+    assert _classify_stealth_flags("") == "NULL"      # no flags
+    assert _classify_stealth_flags("F") == "FIN"      # FIN alone
+    assert _classify_stealth_flags("FPU") == "Xmas"   # FIN+PSH+URG
+    assert _classify_stealth_flags("FA") is None      # normal close (FIN+ACK)
+    assert _classify_stealth_flags("S") is None       # SYN
+    assert _classify_stealth_flags("PA") is None      # data segment
+
+
+def test_stealth_scan_flagged_by_flags_not_volume():
+    # Only 8 ports, but all probed with Xmas flags — caught even under the
+    # volume-based port_scan_ports threshold of 15.
+    pkts = [_tcp("10.0.0.7", "10.0.0.1", port, flags="FPU") for port in range(1, 9)]
+    flags = analyze(pkts, AnalysisConfig(port_scan_ports=15, stealth_scan_ports=6))
+    stealth = [f for f in flags if f.kind == "stealth-scan"]
+    assert stealth and "Xmas" in stealth[0].detail and "10.0.0.7" in stealth[0].detail
+
+
+def test_normal_fin_close_not_stealth_scan():
+    # Graceful closes (FIN+ACK) to many ports must not look like a NULL/FIN scan.
+    pkts = [_tcp("10.0.0.7", "10.0.0.1", port, flags="FA") for port in range(1, 20)]
+    flags = analyze(pkts, AnalysisConfig(stealth_scan_ports=6))
+    assert all(f.kind != "stealth-scan" for f in flags)
 
 
 def test_syn_flood_flagged():

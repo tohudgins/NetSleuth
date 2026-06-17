@@ -33,6 +33,15 @@ def test_fast_flood_fires_on_rate():
     assert any(f.kind == "syn-flood" for f in flags)
 
 
+def test_stealth_scan_fires_in_window_mode():
+    # 8 distinct ports probed with NULL flags inside one 10s window.
+    cfg = AnalysisConfig(window=10.0, stealth_scan_ports=6)
+    pkts = [PacketSummary(i * 0.1, "10.0.0.7", "10.0.0.1", "TCP", 60, "x",
+                          dport=1000 + i, flags="") for i in range(8)]
+    flags = analyze_stream(pkts, cfg)
+    assert any(f.kind == "stealth-scan" and "NULL" in f.detail for f in flags)
+
+
 def test_slow_trickle_does_not_fire_on_rate():
     # Same 600 SYN, but spread over 6000s → 0.1/s. Window mode stays quiet…
     cfg = AnalysisConfig(window=10.0, syn_rate=50.0)
