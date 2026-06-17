@@ -11,11 +11,22 @@
 > default to `127.0.0.1` or the bundled `lab/` network. You are responsible for
 > how you use this tool.
 
-A from-scratch, defensive network security toolkit: an Nmap-style port scanner
-and a Wireshark-style packet sniffer that share one anomaly analyzer, live
-dashboard, and reporting pipeline — with the scanning and capture logic
-implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
-`tshark` binaries.
+**NetSleuth** is a from-scratch, defensive network-security toolkit with three
+integrated capabilities:
+
+1. **Port scanner** — Nmap-style TCP (connect / SYN / FIN / NULL / Xmas) and UDP
+   scanning over **IPv4 and IPv6**, across single hosts, comma-lists, or CIDR
+   ranges, with banner grabbing and an OS *family heuristic*.
+2. **Packet sniffer + traffic analyzer** — Wireshark-style live capture and
+   protocol decode, feeding an anomaly-detection engine.
+3. **Vulnerability mapper** — matches the service versions it finds to NVD CVEs
+   (opt-in, CPE-accurate, cached).
+
+The three are wired together — a scan can auto-trigger focused sniffing of a
+target's open ports, and everything feeds one anomaly analyzer, live dashboard,
+and JSON/HTML reporting pipeline. The scanning and capture logic is implemented
+ourselves (`socket` + `scapy`) — **not** wrapped around the `nmap` or `tshark`
+binaries.
 
 ## Contents
 
@@ -40,21 +51,21 @@ implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
 
 ## Highlights
 
-- **Web dashboard** — a polished dark-theme browser UI to run scans, discover
-  hosts, analyze uploaded captures, and watch live capture stream in real time:
-  SVG protocol donut + traffic-over-time chart, sortable tables, and a
-  click-to-inspect packet hexdump.
-- **History & diff** — save scans/discoveries to a local SQLite DB and answer
-  *"what changed since last time?"* — newly-open ports, hosts that appeared or
-  vanished, and a gateway MAC that moved (the very signal the MITM detector
-  hunts live).
-- **Host & network discovery** — map the live hosts on a subnet you own: a
-  privileged ARP sweep (with MAC + best-guess vendor), an unprivileged TCP-ping
-  fallback, and **IPv6** discovery via NDP (`ping6 ff02::1`).
-- **Port scanner** — TCP connect scan (unprivileged), half-open SYN scan
-  (privileged, scapy), and UDP scan; banner grabbing incl. TLS for HTTPS; an OS
-  *family heuristic* (a coarse TTL best guess — **not** real fingerprinting);
-  nmap-style **timing templates** (`-T0..5`, paranoid→insane).
+The core is the from-scratch networking: the scan, capture, and analysis logic
+is implemented with `socket` + `scapy`, **not** wrapped around the `nmap` or
+`tshark` binaries. Everything under *Beyond the core* is a layer on top of that
+same engine.
+
+### Core — built from scratch
+
+- **Port scanner** — TCP connect scan (unprivileged, `socket.connect_ex`),
+  half-open **SYN scan** (privileged: we craft the SYN with scapy and classify
+  the reply ourselves), **FIN/NULL/Xmas stealth scans** (`--scan-type`, RFC 793
+  half-open techniques), and a UDP scan with **protocol-aware probes** (real
+  DNS/NTP/SNMP requests, not a null byte) and honest `open|filtered` states; banner
+  grabbing incl. TLS for HTTPS; an OS *family heuristic* (a coarse TTL + TCP
+  window best guess — **not** real fingerprinting); nmap-style **timing templates**
+  (`-T0..5`, paranoid→insane); a `ThreadPoolExecutor` concurrency model.
 - **Packet sniffer** — scapy `sniff()` in a dedicated thread with a stop event;
   decodes TCP/UDP/ICMP/ARP/DNS; per-IP and per-protocol traffic stats; our own
   hex dump.
@@ -68,18 +79,27 @@ implemented ourselves (`socket` + `scapy`), **not** wrapped around the `nmap` or
   captured ARP traffic for poisoning signs (baseline MAC changes, duplicate IPs,
   one MAC impersonating many hosts, gratuitous-ARP floods). NetSleuth detects
   MITM; it never performs it.
+- **Host & network discovery** — map the live hosts on a subnet you own: a
+  privileged ARP sweep (with MAC + best-guess vendor), an unprivileged TCP-ping
+  fallback, and **IPv6** discovery via NDP (`ping6 ff02::1`).
 - **Integration** — `--scan-then-sniff` scans a target, then focuses capture on
   its open ports behind a live `rich` dashboard.
-- **Reporting** — unified JSON + HTML reports from any mode.
-- **PCAP import** — run the full detection pipeline over saved capture files
-  (offline, no privileges) — analyze real-world datasets legally.
-- **Alert forwarding** — emit anomaly *and* ARP-spoofing alerts as JSON-lines /
-  webhook / syslog for SIEM-style integration.
-- **CVE lookup** — map detected banners to CVEs via NVD (opt-in): precise,
-  version-aware **CPE** matching for known products (keyword fallback otherwise),
-  with an on-disk cache so repeat lookups are offline and instant.
 - **Graceful degradation** — unprivileged, it falls back to a connect scan and
   skips live capture instead of crashing.
+
+### Beyond the core — layers on the same engine
+
+- **Reporting** — unified JSON + HTML reports from any mode.
+- **PCAP import** — run the full detection pipeline over saved captures (offline,
+  no privileges).
+- **Web dashboard** — dark-theme browser UI (Flask + SSE): scan, discover, analyze
+  captures, and watch live capture stream with SVG charts and a packet hexdump.
+- **History & diff** — persist scans/discoveries to SQLite and answer *"what
+  changed since last time?"* (new ports, hosts, a moved gateway MAC).
+- **Alert forwarding** — emit anomaly + ARP-spoofing alerts as JSON-lines / webhook
+  / syslog for SIEM-style integration.
+- **CVE lookup** — map detected service versions to NVD CVEs (opt-in, CPE-accurate,
+  cached).
 
 ## Install
 
@@ -156,18 +176,29 @@ self-contained and offline.
 # scan localhost (works unprivileged via connect scan)
 python main.py 127.0.0.1 -p 1-1024
 
+# scan a CIDR range or comma-list; IPv6 works too; --grep for pipe-friendly output
+python main.py 192.168.1.0/28 -p 22,80,443 --grep
+python main.py ::1 -p 1-1024
+
 # discover live hosts on a subnet (ARP sweep w/ sudo, else TCP-ping)
 sudo python main.py 192.168.1.0/24 --discover
 
 # privileged SYN scan (needs sudo / Administrator)
 sudo python main.py 127.0.0.1 -p 22,80,443
 
-# UDP scan
-python main.py 127.0.0.1 -p 53,123 --udp
+# UDP scan (sends real DNS/NTP/SNMP probes to elicit replies)
+python main.py 127.0.0.1 -p 53,123,161 --udp
+
+# stealth scans — FIN / NULL / Xmas (need sudo; degrade to connect otherwise)
+sudo python main.py 127.0.0.1 -p 1-1024 --scan-type xmas
 
 # live packet capture for 10s (needs sudo / Administrator)
 sudo python main.py --sniff --duration 10
 sudo python main.py --sniff --filter "tcp port 80" --count 50 --hex
+
+# capture and save to a .pcap — reopen in Wireshark or re-analyze with --pcap
+sudo python main.py --sniff --duration 30 --write-pcap capture.pcap
+python main.py --pcap capture.pcap                 # round-trips into the analyzer
 
 # integrated: scan, then sniff the open ports behind a live dashboard,
 # with anomaly flags + a JSON/HTML report (written to reports/)
@@ -206,10 +237,10 @@ python main.py --pcap lab/samples/slow_scan.pcap            # batch → port-sca
 python main.py --pcap lab/samples/slow_scan.pcap --stream   # windowed → slow-scan
 ```
 
-The analyzer flags port-scan, SYN-flood, ARP-spoof, ICMP-flood, DNS-tunnel,
-beacon, and new-host patterns (and the spoofing detector raises its own alerts),
-writing the same JSON/HTML report as the live modes. The lab ships a sample
-capture for each of these.
+The analyzer flags port-scan, stealth-scan (NULL/FIN/Xmas), SYN-flood, ARP-spoof,
+ICMP-flood, DNS-tunnel, beacon, and new-host patterns (and the spoofing detector
+raises its own alerts), writing the same JSON/HTML report as the live modes. The
+lab ships a sample capture for each of these.
 
 ### History & diff — "what changed since last time?"
 
@@ -270,34 +301,32 @@ python main.py 192.168.1.10 -p 1-1024 -T2     # polite
 sudo python main.py 192.168.1.10 -p 1-65535 -T4   # aggressive SYN scan
 ```
 
-CVE results are keyword-matched *candidates* from NVD — verify before acting,
-they are not a confirmed-vulnerable verdict.
-
 ## Architecture
 
 ```
-        ┌──────────────────────┬──────────────────────┐
-   cli.py (argparse, rich)      web.py (Flask + SSE, browser UI)
-        └───────────┬──────────┴───────────┬──────────┘
-        ┌──────────┬────────┼────────┬─────────┬─────────┐
-        ▼          ▼        ▼        ▼         ▼         ▼
-  scanner.py  sniffer.py discovery pcap.py  cve.py  (privileges.py
-  (socket+   (scapy sniff .py (ARP/ (offline (NVD      gates raw I/O)
-   scapy)     in a thread) ping sweep) caps)  lookup)
-        │          │                  │
-        └───► PacketSummary / ScanReport / DiscoveryReport ◄──┐
-                        │                                      │
-                        ├──► analyzer.py ──► AnomalyFlag ──────┤
-                        └──► defense.py  ──► DefenseAlert ─────┤
-                        │                                      │
-              ┌─────────┼───────────┬───────────┐             │
-              ▼         ▼           ▼            ▼             │
-          ui.py     reporter.py   alerts.py ◄─────────────────┘
-        (rich)    (JSON + HTML)  (jsonl/webhook/syslog)
-                        │
-                   store.py (SQLite run history) ──► diff.py
-                   (--save / --diff / --history)    (ScanDiff / DiscoveryDiff:
-                                                     what changed since last run)
+ FRONT ENDS    cli.py (argparse + rich)      web.py (Flask + SSE browser UI)
+                          └──────────────┬──────────────┘
+                                         │  (both wire the same modules)
+ ─────────────────────────────────────────────────────────────────────────
+ COLLECTORS   scanner.py   sniffer.py    discovery.py   pcap.py
+              socket +     scapy sniff   ARP / TCP-ping  offline
+              scapy        in a thread   subnet sweep    capture replay
+                  │            │              │             │
+                  └────────────┴──────┬───────┴─────────────┘
+                                      ▼
+ CORE TYPES        ScanReport · PacketSummary · DiscoveryReport
+                                      │
+ DETECTION         ├──► analyzer.py ──► AnomalyFlag     (port/stealth scan,
+                   │                                     floods, tunnels, beacons)
+                   └──► defense.py  ──► DefenseAlert     (ARP-spoof / MITM)
+                                      │
+ ENRICHERS (opt-in, fail-soft)   cve.py (NVD CVEs)   geoip.py (country / ASN)
+                                      │
+ OUTPUT       ui.py (rich)   reporter.py (JSON + HTML)   alerts.py (jsonl/webhook/syslog)
+                                      │
+ STATE        store.py (SQLite history) ──► diff.py  ("what changed since last run")
+
+ privileges.py gates all raw I/O and drives graceful unprivileged degradation.
 ```
 
 Dependencies point **inward**: presentation (`ui`, `web`), serialization
@@ -330,24 +359,22 @@ compose, not a finished tool we orchestrate. Even the hex dump is hand-rolled.
 
 **Honest OS detection → an OS *family heuristic*.** Real fingerprinting needs
 dozens of probes and a signature database. We map an observed TTL to a coarse
-family and label it a "best guess (heuristic)" everywhere — in code, CLI, and
-report. Calling a TTL check "OS detection" would be dishonest.
+family, refined by the TCP window size as a weak secondary signal (a tiny window
+leans toward embedded/network gear), and label it a "best guess (heuristic)"
+everywhere — in code, CLI, and report. Calling a TTL+window check "OS detection"
+would be dishonest.
 
-**One concurrency model: threads, never asyncio.** The scanner fans probes
-across ports with a single `ThreadPoolExecutor`; the sniffer runs scapy's
-blocking `sniff()` in one dedicated thread governed by a `threading.Event`. We
-avoid mixing asyncio with threads and blocking scapy. The live dashboard reads
-the capture buffer via atomic `list()` snapshots rather than iterating a list
-the capture thread is mutating. **The web UI uses Flask (synchronous, threaded)
-with Server-Sent Events — deliberately not async FastAPI — so this one model
-holds across the whole stack.**
+**One concurrency model: threads, never asyncio.** The scanner fans probes across
+ports with a single `ThreadPoolExecutor`; the sniffer runs scapy's blocking
+`sniff()` in one dedicated thread governed by a `threading.Event`, and the live
+dashboard reads its buffer via atomic `list()` snapshots. The web UI is Flask
+(synchronous, threaded) with Server-Sent Events — deliberately not async FastAPI —
+so the one model holds across the whole stack.
 
-**The server never exposes itself.** Beyond binding to loopback, every request
-is checked: a non-loopback `Host` header (the fingerprint of a DNS-rebinding
-attack) or a cross-origin `Origin` (CSRF from a malicious local page) is rejected
-with 403. `netsleuth-web` binds to `127.0.0.1` only
-and refuses non-loopback hosts: a tool that runs scans and captures must not be
-reachable over the network.
+**The server never exposes itself.** A tool that runs scans and captures must not
+be reachable over the network: `netsleuth-web` binds to `127.0.0.1` only and
+rejects with 403 any request carrying a non-loopback `Host` header (DNS-rebinding)
+or a cross-origin `Origin` (CSRF).
 
 **Graceful privilege degradation.** `privileges.py` detects root/Admin once;
 unprivileged, the scanner falls back to a connect scan and the sniffer prints a
@@ -371,6 +398,7 @@ The analyzer flags these patterns over a batch of decoded packets:
 | Flag | Signal | Honest limitation |
 |---|---|---|
 | **port-scan** | one source touches ≥ N distinct TCP ports | a busy client can look similar; threshold-based |
+| **stealth-scan** | one source probes ≥ N ports with NULL/FIN/Xmas flag combos | catches stealth scans by their *flags* even at low volume; the combos are abnormal but a broken stack could emit them |
 | **SYN flood** | ≥ N SYN-only segments toward one destination | no rate/time window; volume-based |
 | **ARP spoof** | one IP advertised with > 1 MAC | legitimate failover can also trigger it |
 | **ICMP flood** | ≥ N ICMP/ICMPv6 packets toward one destination | also fires on a benign ping sweep |
@@ -479,23 +507,16 @@ ruff check . && mypy netsleuth main.py && pytest -q
 
 ## Project status
 
-- [x] Phase 1 — Scanner (connect + SYN, UDP, banner grab, OS family heuristic)
-- [x] Phase 2 — Sniffer (threaded scapy capture, TCP/UDP/ICMP/ARP/DNS decode, per-IP stats)
-- [x] Phase 3 — Integration (--scan-then-sniff), analyzer anomaly flags, live dashboard, JSON/HTML reports
-- [x] Phase 4 — PCAP import, attack-sample lab, alert forwarding (JSON-lines/webhook/syslog), CVE lookup
-- [x] Phase 5 — Web dashboard (Flask + SSE): scan, pcap analysis, live capture in the browser
-- [x] Phase 6 — Host & network discovery, ARP-spoofing/MITM detector, deeper anomaly
-      heuristics (ICMP flood, DNS tunneling, beaconing, new-host), and a polished
-      dark dashboard with SVG charts, sortable tables, and packet hexdump drill-down
-- [x] Phase 7 — Stateful history: SQLite persistence + scan/discovery diffing
-      (`--save`/`--diff`/`--history`) with a web History tab — "what changed since last run"
-- [x] Phase 8 — Windowed/streaming analyzer (one engine, two modes): rate-based
-      flood detection + low-and-slow scan detection (`--stream`), incremental
-      live processing that removes the per-tick O(n²) re-scan
-- [x] Phase 9 — Polish: CPE-based CVE matching + on-disk cache, IPv6 discovery
-      (NDP), web Host/Origin hardening, nmap-style scan timing templates (`-T0..5`)
-- [x] Phase 10 — Ergonomics & packaging: `-v/--verbose` logging, `--config`
-      thresholds, opt-in GeoIP/ASN enrichment, Dockerfile, and a recordable demo script
+Built as a phased story (the git history reads phase by phase); all phases ship:
+
+- [x] **Scanner** — connect / SYN / FIN / NULL / Xmas / UDP, banner grab, OS family heuristic, timing templates
+- [x] **Sniffer** — threaded scapy capture, TCP/UDP/ICMP/ARP/DNS decode, per-IP/per-protocol stats
+- [x] **Analyzer** — one engine, two modes (batch counts + windowed rates); scan/flood/tunnel/beacon/MITM heuristics
+- [x] **Integration & reporting** — `--scan-then-sniff`, live `rich` dashboard, JSON + HTML reports
+- [x] **Web dashboard** — Flask + SSE: scan, discover, pcap analysis, and live capture in the browser
+- [x] **Discovery** — ARP / TCP-ping / IPv6-NDP subnet sweep with vendor guess
+- [x] **History** — SQLite persistence + scan/discovery diffing (`--save`/`--diff`/`--history`)
+- [x] **Enrichment** — opt-in CVE (CPE-matched, cached) and GeoIP/ASN; alert forwarding to jsonl/webhook/syslog
 
 ## Limitations & future work
 
@@ -516,8 +537,14 @@ ruff check . && mypy netsleuth main.py && pytest -q
   clock), and re-alerts a *sustained* condition once per cooldown rather than
   tracking a single episode; a wall-clock `watch` mode and per-flow reassembly
   remain future work.
-- CVE matching is keyword-based against NVD; CPE-accurate matching would be more
-  precise.
+- Vulnerability mapping is only as good as the banner: known products get a
+  version-aware **CPE** match against NVD, but unknown products fall back to a
+  keyword search that returns *candidates* to verify, not confirmed findings.
+  There is no authenticated/deep vulnerability scanning (it is not a Nessus-class
+  tool, by design).
+- IPv6 scanning covers connect / SYN / FIN / NULL / Xmas; the privileged UDP scan
+  doesn't yet decode ICMPv6 port-unreachable, so a closed IPv6 UDP port reads as
+  `open|filtered` rather than `closed`.
 - Nice-to-have: a recorded `docs/demo.gif`. [`docs/demo.sh`](docs/demo.sh) is a
   one-command, offline walkthrough (sample attacks → detection → history diff)
   ready to record with `asciinema`/`agg`, `vhs`, or any screen recorder.
