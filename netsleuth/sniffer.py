@@ -25,7 +25,7 @@ from .privileges import can_raw_socket
 logger = logging.getLogger(__name__)
 
 try:
-    from scapy.all import ARP, DNS, ICMP, IP, IPv6, TCP, UDP, sniff
+    from scapy.all import ARP, DNS, ICMP, IP, IPv6, TCP, UDP, sniff, wrpcap
     from scapy.all import conf as scapy_conf
     from scapy.error import Scapy_Exception
 
@@ -214,14 +214,19 @@ class Sniffer:
         bpf_filter: str | None = None,
         count: int = 0,
         collect: bool = True,
+        keep_raw: bool = False,
         on_packet: Callable[[PacketSummary, Any], None] | None = None,
     ) -> None:
         self.iface = iface
         self.bpf_filter = bpf_filter
         self.max_count = count  # 0 = unlimited
         self.collect = collect
+        # Retain raw scapy packets too (memory cost) so the capture can be saved
+        # to a .pcap for Wireshark / re-analysis via `--pcap`.
+        self.keep_raw = keep_raw
         self.on_packet = on_packet
         self.packets: list[PacketSummary] = []
+        self.raw_packets: list[Any] = []
         self.stats = TrafficStats()
         self.error: Exception | None = None  # set if the capture thread fails
         self._stop = threading.Event()
@@ -232,6 +237,8 @@ class Sniffer:
         self.stats.record(summary)
         if self.collect:
             self.packets.append(summary)
+        if self.keep_raw:
+            self.raw_packets.append(pkt)
         if self.on_packet is not None:
             self.on_packet(summary, pkt)
         if self.max_count and self.stats.packets >= self.max_count:
@@ -277,3 +284,17 @@ class Sniffer:
         if self._thread is not None:
             self._thread.join(timeout=timeout)
         logger.info("capture stopped: %d packets", self.stats.packets)
+
+    def write_pcap(self, path: str) -> int:
+        """Save the captured raw packets to a .pcap file; returns the count.
+
+        Requires ``keep_raw=True`` at construction. Raises ``RuntimeError`` if no
+        raw packets were retained, so a caller never writes a silently-empty file.
+        """
+        if not self.keep_raw:
+            raise RuntimeError("sniffer was not built with keep_raw=True")
+        if not self.raw_packets:
+            raise RuntimeError("no packets captured — nothing to write")
+        wrpcap(path, self.raw_packets)
+        logger.info("wrote %d packets to %s", len(self.raw_packets), path)
+        return len(self.raw_packets)

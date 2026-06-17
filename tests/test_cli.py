@@ -21,6 +21,32 @@ def _args(**kw) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
+# --- _expand_targets ------------------------------------------------------- #
+
+def test_expand_targets_single_and_list():
+    assert cli._expand_targets("10.0.0.1") == ["10.0.0.1"]
+    assert cli._expand_targets("10.0.0.1, 10.0.0.2") == ["10.0.0.1", "10.0.0.2"]
+    # hostnames pass through untouched
+    assert cli._expand_targets("example.com") == ["example.com"]
+
+
+def test_expand_targets_cidr_expands_and_dedupes():
+    assert cli._expand_targets("192.168.1.0/30") == ["192.168.1.1", "192.168.1.2"]
+    # a duplicate across list + CIDR is collapsed, order preserved
+    assert cli._expand_targets("192.168.1.1, 192.168.1.0/30") == [
+        "192.168.1.1", "192.168.1.2"]
+
+
+def test_expand_targets_ipv6_cidr():
+    assert cli._expand_targets("2001:db8::/126") == [
+        "2001:db8::1", "2001:db8::2", "2001:db8::3"]
+
+
+def test_expand_targets_rejects_oversize_cidr():
+    with pytest.raises(ValueError, match="max"):
+        cli._expand_targets("10.0.0.0/8")
+
+
 # --- _known_hosts ---------------------------------------------------------- #
 
 def test_known_hosts_explicit_list():

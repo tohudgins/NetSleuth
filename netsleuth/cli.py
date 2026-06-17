@@ -45,7 +45,13 @@ from netsleuth.discovery import (
 from netsleuth.pcap import analyze_pcap
 from netsleuth.privileges import privilege_notice
 from netsleuth.reporter import build_report, write_report
-from netsleuth.scanner import TIMING_TEMPLATES, Protocol, ScanReport, scan
+from netsleuth.scanner import (
+    TIMING_TEMPLATES,
+    PortState,
+    Protocol,
+    ScanReport,
+    scan,
+)
 from netsleuth.sniffer import (
     PacketSummary,
     Sniffer,
@@ -66,6 +72,40 @@ def _parse_ports(spec: str) -> list[int]:
         elif part:
             ports.add(int(part))
     return sorted(p for p in ports if 0 < p <= 65535)
+
+
+# Cap CIDR expansion so a typo like /8 can't launch millions of probes.
+_MAX_SCAN_HOSTS = 1024
+
+
+def _expand_targets(spec: str) -> list[str]:
+    """Expand a target spec into concrete hosts.
+
+    Accepts a single host, a comma-separated list, and/or CIDR blocks
+    (``10.0.0.0/29``, ``2001:db8::/126``). Plain hostnames pass through
+    untouched. Raises ``ValueError`` if a CIDR would exceed ``_MAX_SCAN_HOSTS``.
+    """
+    import ipaddress
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in (p.strip() for p in spec.split(",")):
+        if not part:
+            continue
+        if "/" in part:
+            net = ipaddress.ip_network(part, strict=False)
+            hosts = list(net.hosts()) or [net.network_address]
+            if len(hosts) > _MAX_SCAN_HOSTS:
+                raise ValueError(
+                    f"{part} expands to {len(hosts)} hosts (max {_MAX_SCAN_HOSTS})")
+            candidates = [str(h) for h in hosts]
+        else:
+            candidates = [part]
+        for host in candidates:
+            if host not in seen:
+                seen.add(host)
+                out.append(host)
+    return out
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -89,8 +129,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="nmap-style timing template: 0 paranoid … 3 normal … 5 insane")
     p.add_argument("--connect", action="store_true",
                    help="force unprivileged connect scan even if privileged")
+    p.add_argument("--scan-type", choices=("fin", "null", "xmas"), default=None,
+                   metavar="TYPE",
+                   help="TCP stealth scan (needs root): fin, null, or xmas; "
+                        "falls back to connect scan when unprivileged")
     p.add_argument("--show-closed", action="store_true",
                    help="list closed/filtered ports too (default: only open)")
+    p.add_argument("--grep", action="store_true",
+                   help="greppable one-line-per-open-port output (pipe-friendly)")
     p.add_argument("-v", "--verbose", action="count", default=0,
                    help="verbose diagnostics: -v INFO, -vv DEBUG")
 
@@ -106,6 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
                            help="capture seconds when --count is 0 (default: 10)")
     sniff_grp.add_argument("--hex", action="store_true",
                            help="hex-dump each captured packet")
+    sniff_grp.add_argument("--write-pcap", default=None, metavar="FILE",
+                           help="save the live capture to a .pcap (Wireshark / --pcap)")
 
     intg_grp = p.add_argument_group("integration + reporting")
     intg_grp.add_argument("--discover", action="store_true",
@@ -191,20 +239,34 @@ def _timing(args: argparse.Namespace) -> tuple[int, float, float]:
     return workers, timeout, delay
 
 
-def _scan(args: argparse.Namespace, proto: Protocol, *, show_progress: bool) -> ScanReport:
+def _scan(args: argparse.Namespace, proto: Protocol, *, show_progress: bool,
+          target: str | None = None) -> ScanReport:
+    host = target if target is not None else args.target
     ports = _parse_ports(args.ports)
     workers, timeout, delay = _timing(args)
+    stealth = getattr(args, "scan_type", None)
     if not show_progress:
-        return scan(args.target, ports, proto=proto, timeout=timeout,
-                    max_workers=workers, delay=delay, force_connect=args.connect)
+        return scan(host, ports, proto=proto, timeout=timeout,
+                    max_workers=workers, delay=delay, force_connect=args.connect,
+                    stealth=stealth)
     progress = ui.make_scan_progress()
     with progress:
-        task = progress.add_task(f"scanning {args.target}", total=len(ports))
+        task = progress.add_task(f"scanning {host}", total=len(ports))
         return scan(
-            args.target, ports, proto=proto, timeout=timeout,
+            host, ports, proto=proto, timeout=timeout,
             max_workers=workers, delay=delay, force_connect=args.connect,
-            on_result=lambda _r: progress.advance(task),
+            stealth=stealth, on_result=lambda _r: progress.advance(task),
         )
+
+
+def _print_greppable(report: ScanReport) -> None:
+    """One pipe-friendly line per open port: ``host port/proto state service``."""
+    for p in report.ports:
+        if p.state in (PortState.OPEN, PortState.OPEN_FILTERED):
+            ui.console.print(
+                f"{report.target} {p.port}/{p.proto.value} {p.state.value} "
+                f"{p.service_hint or '-'}",
+                highlight=False, soft_wrap=True)
 
 
 def _write_reports(
@@ -417,17 +479,36 @@ def _cve_enrich(
 # --- modes ----------------------------------------------------------------- #
 
 def run_scan(args: argparse.Namespace) -> int:
-    proto = Protocol.UDP if args.udp else Protocol.TCP
-    report = _scan(args, proto, show_progress=True)
+    try:
+        targets = _expand_targets(args.target)
+    except ValueError as exc:
+        ui.console.print(f"Bad target: {exc}", style="bold red")
+        return 2
+    if len(targets) == 1:
+        return _run_scan_one(args, targets[0])
+    ui.console.print(f"Scanning {len(targets)} hosts…", style="cyan")
+    rc = 0
+    for host in targets:
+        ui.console.print(f"\n[bold cyan]── {host} ──[/bold cyan]")
+        rc |= _run_scan_one(args, host)
+    return rc
 
-    if report.os_family_guess:
-        ui.console.print(
-            f"OS family (heuristic, best guess): {report.os_family_guess}",
-            style="magenta",
-        )
-    ui.console.print(ui.render_scan_table(report, show_closed=args.show_closed))
-    if not report.open_ports:
-        ui.console.print("  no open ports found", style="dim")
+
+def _run_scan_one(args: argparse.Namespace, target: str) -> int:
+    proto = Protocol.UDP if args.udp else Protocol.TCP
+    report = _scan(args, proto, show_progress=not args.grep, target=target)
+
+    if args.grep:
+        _print_greppable(report)
+    else:
+        if report.os_family_guess:
+            ui.console.print(
+                f"OS family (heuristic, best guess): {report.os_family_guess}",
+                style="magenta",
+            )
+        ui.console.print(ui.render_scan_table(report, show_closed=args.show_closed))
+        if not report.open_ports:
+            ui.console.print("  no open ports found", style="dim")
 
     cves = _cve_enrich(args, report)
     report_dict = build_report(scan=report, cves=cves)
@@ -475,6 +556,17 @@ def run_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _save_pcap(args: argparse.Namespace, sniffer: Sniffer) -> None:
+    """Write the capture to --write-pcap if requested; fail soft on errors."""
+    if not args.write_pcap:
+        return
+    try:
+        n = sniffer.write_pcap(args.write_pcap)
+        ui.console.print(f"Wrote {n} packets to {args.write_pcap}", style="green")
+    except (RuntimeError, OSError) as exc:
+        ui.console.print(f"Could not write pcap: {exc}", style="yellow")
+
+
 def run_sniff(args: argparse.Namespace) -> int:
     _warn_history_ignored(args)
     if not capture_available():
@@ -497,7 +589,7 @@ def run_sniff(args: argparse.Namespace) -> int:
             ui.console.print(hexdump(bytes(raw_pkt)), style="dim")
 
     sniffer = Sniffer(iface=args.iface, bpf_filter=args.bpf, count=args.count,
-                      on_packet=_on_packet)
+                      keep_raw=bool(args.write_pcap), on_packet=_on_packet)
     limit = f"{args.count} packets" if args.count else f"{args.duration:g}s"
     ui.console.print(f"Capturing ({limit}) — Ctrl-C to stop early…", style="cyan")
 
@@ -515,6 +607,7 @@ def run_sniff(args: argparse.Namespace) -> int:
         ui.console.print(f"Capture failed: {sniffer.error}", style="bold red")
         return 1
 
+    _save_pcap(args, sniffer)
     packets = list(sniffer.packets)
     # A finished live capture → windowed/rate verdict (time-aware).
     anomalies = analyze_stream(packets, _analysis_config(args), known_hosts=known)
@@ -581,7 +674,8 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
     # The sniffer collects into its own list from the capture thread; we only
     # read atomic snapshots here, so we don't share a mutable buffer across
     # threads (list(x) over a list is atomic under the GIL).
-    sniffer = Sniffer(iface=args.iface, bpf_filter=bpf)
+    sniffer = Sniffer(iface=args.iface, bpf_filter=bpf,
+                      keep_raw=bool(args.write_pcap))
 
     ui.console.print(
         f"Sniffing {args.target} ports {open_ports} for {args.duration:g}s "
@@ -622,6 +716,7 @@ def run_scan_then_sniff(args: argparse.Namespace) -> int:
     if sniffer.error is not None:
         ui.console.print(f"Capture failed: {sniffer.error}", style="bold red")
 
+    _save_pcap(args, sniffer)
     _forward_alerts(args, anomalies, spoofing)
     _write_reports(args, scan_report=report, stats=sniffer.stats,
                    anomalies=anomalies, cves=cves, defense=spoofing,

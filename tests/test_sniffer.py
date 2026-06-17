@@ -10,6 +10,7 @@ import pytest
 
 from netsleuth.sniffer import (
     PacketSummary,
+    Sniffer,
     TrafficStats,
     _SCAPY_AVAILABLE,
     hexdump,
@@ -20,8 +21,33 @@ if not _SCAPY_AVAILABLE:  # pragma: no cover - environment dependent
     pytest.skip("scapy not installed", allow_module_level=True)
 
 from scapy.all import (  # noqa: E402
-    ARP, DNS, DNSQR, ICMP, IP, IPv6, TCP, UDP, ICMPv6EchoRequest,
+    ARP, DNS, DNSQR, ICMP, IP, IPv6, TCP, UDP, ICMPv6EchoRequest, rdpcap,
 )
+
+
+def test_write_pcap_round_trips(tmp_path):
+    # Feed raw packets through the capture handler, then save + reload them.
+    snf = Sniffer(keep_raw=True)
+    for dport in (80, 443, 22):
+        snf._handle(IP(src="10.0.0.1", dst="10.0.0.2") / TCP(dport=dport, flags="S"))
+    out = tmp_path / "capture.pcap"
+    assert snf.write_pcap(str(out)) == 3
+    reloaded = rdpcap(str(out))
+    assert len(reloaded) == 3
+    assert {int(p[TCP].dport) for p in reloaded} == {80, 443, 22}
+
+
+def test_write_pcap_requires_keep_raw():
+    snf = Sniffer()  # keep_raw defaults off
+    snf._handle(IP(dst="10.0.0.2") / TCP(dport=80))
+    with pytest.raises(RuntimeError, match="keep_raw"):
+        snf.write_pcap("/tmp/never-written.pcap")
+
+
+def test_write_pcap_empty_capture_raises(tmp_path):
+    snf = Sniffer(keep_raw=True)  # nothing captured
+    with pytest.raises(RuntimeError, match="no packets"):
+        snf.write_pcap(str(tmp_path / "empty.pcap"))
 
 
 def test_summarize_tcp():
