@@ -88,6 +88,44 @@ answer *"what changed since last time?"* (a new port, a moved gateway MAC);
 `--alert-jsonl`/`--alert-webhook`/`--alert-syslog` forward anomaly and
 ARP-spoofing alerts to a SIEM or honeypot.
 
+## Run with Docker
+
+The repo ships a [`Dockerfile`](Dockerfile) so you can run the CLI or web UI
+without a local Python install. Build once:
+
+```bash
+docker build -t netsleuth .
+```
+
+**CLI scans** — the default entrypoint is the `netsleuth` CLI:
+
+```bash
+# connect scan (unprivileged). NOTE: 127.0.0.1 is the CONTAINER's loopback —
+# to scan services on your host, target host.docker.internal instead.
+docker run --rm netsleuth host.docker.internal -p 1-1024 --connect
+
+# SYN scan / live capture need raw-socket capabilities
+docker run --rm --cap-add=NET_RAW --cap-add=NET_ADMIN netsleuth <target> --sniff
+```
+
+**Web UI** — the server **binds to `127.0.0.1` only by design** and refuses any
+non-loopback bind, so it needs the host's network namespace rather than a
+published port. This works on **Linux**:
+
+```bash
+docker run --rm --network host --entrypoint netsleuth-web netsleuth
+# → browse http://127.0.0.1:8765
+```
+
+> **macOS / Windows (Docker Desktop):** `--network host` shares the Docker *VM's*
+> loopback, not your machine's, so the web UI is unreachable from your browser
+> (and the server refuses to bind `0.0.0.0`, so port-publishing won't help).
+> Run the dashboard natively instead — it needs no privileges:
+>
+> ```bash
+> pip install -e . && netsleuth-web   # → http://127.0.0.1:8765
+> ```
+
 ## Architecture
 
 ```
